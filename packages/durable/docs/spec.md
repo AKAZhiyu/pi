@@ -315,8 +315,10 @@ Context derivation:
     kind ahead of the baseline therefore keeps the baseline from leading.
     Stored entries and `contributions` keep the committed order.
 
-Views carry raw active entries. UI reduction and model-context reduction are
-separate consumers. Older stored history is available through the owning
+The conversation view (section 9.3) carries a window over the visible
+entries in ID order, head markers in place; `Conversation.context()` derives
+the active transcript. UI reduction and model-context reduction are separate
+consumers. Entries outside the window are available through the owning
 `Conversation` object's cursor-based `entries()` scan.
 
 ### 2.2 Public Harness surface
@@ -685,8 +687,8 @@ interface Conversation {
   /** `{ background: true }` also aborts background work under the conversation (section 5.4). */
   abort(context: Context, options?: { readonly background?: boolean }): Promise<void>;
   waitForIdle(context: Context): Promise<void>;
-  /** The structural view (section 9.3) as a watch. */
-  watch(context: Context): Promise<ConversationWatch>;
+  /** The structural view (section 9.3) as a watch; `window` bounds its entries. */
+  watch(context: Context, window?: ConversationWindow): Promise<ConversationWatch>;
 }
 
 interface Harness extends Session {
@@ -716,10 +718,10 @@ interface Harness extends Session {
   waitForIdle(context: Context): Promise<void>;
   /** Session total of every conversation's `pi.usage` (section 8.6). */
   usage(context: Context): Promise<UsageState>;
-  /** Live tasks as a structural view (section 9.5), as a watch. */
+  /** Live tasks as a structural view (section 9.4), as a watch. */
   watchTaskGraph(context: Context): Promise<TaskGraphWatch>;
   /** Synchronous observers of a conversation view and of the task graph, for adapters (section 9.1). */
-  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context): Promise<Observation<ConversationView>>;
+  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context, window?: ConversationWindow): Promise<Observation<ConversationView>>;
   observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 
@@ -924,7 +926,7 @@ replace its model configuration without reopening the Harness. Settings are sync
 modes are read on the Session line. `stream` is forwarded to generation
 requests; `stream.maxRetries` are provider retries inside one request, while
 `retry` governs durable generation attempts (section 8.3). Settings changes make
-no commit and emit no event.
+no commit and change no view.
 
 ```ts
 // The user's settings, read live through getters.
@@ -1025,7 +1027,7 @@ wait aborts only that waiter.
 
 Conversation handles are stateless; compare them by `id`. Hosts discover
 conversations through lookups and scans. There is no creation listener; the task
-graph view (section 9.5), `inspect()`, and the idle waits report live work.
+graph view (section 9.4), `inspect()`, and the idle waits report live work.
 
 `submit()` returns after durable admission, not settlement. An input submission
 creates a user message with the Harness clock's timestamp at placement, which is
@@ -1867,7 +1869,7 @@ at its stored version. Anything else, such as an entry, a task state, a
 submission, another document, a document's creation, migration, or retirement,
 makes it immediate, a normal commit. A held commit is adopted in memory by
 pointer swap, resolves, and is published to the Session's own observers: document
-watches, the conversation view and agent events (section 9). Its stored
+watches and the conversation view (section 9). Its stored
 version and delta count stay; its operations wait, folded per incarnation
 (Chord's `PendingOps`), and the incarnation is pinned in the cache, so idle
 eviction skips it at any retention.
@@ -2404,7 +2406,7 @@ runtime state, not a persisted task status. A blocked task is not active in
 `wake()` (section 5.6): only a registry change, or `retryTask()` for a parked
 one, can let it run, and either makes `onWake` report it active, so a host need
 not poll it. The task graph shows the reason and follows registry changes
-(section 9.5). Document migration remains
+(section 9.4). Document migration remains
 access-driven.
 
 Aborting a blocked task cannot run its abort handler, because that code is
@@ -2694,7 +2696,7 @@ An input is placed as one entry whose `model` is the user message of its
 `content`: a `pi.user` entry, or, with `entry: { kind, data }`, an entry of that
 kind carrying that data. Only `kind` and `data` are taken from `entry`; admission
 rejects a kind that is not a non-empty string or starts with `pi.`. Nothing in
-the Harness reads input entries by kind; context, compaction, events, and run
+the Harness reads input entries by kind; context, compaction, and run
 accounting go by `model` and the submission records.
 
 A write of only `kind` and `data`, with no `model`, `head`, or `edits` (present
@@ -3076,8 +3078,8 @@ await conversation.configure({ extensions: { add: [Venv] } }, context);
 | boundaries and idle admission, on the Session line | queue modes | per boundary (section 6) |
 | tool task, `prepare`, `runtime.env()` | environment | at each call (section 2.2) |
 
-Registry installs and settings changes make no commit, so they emit nothing
-(section 9.4). A conversation on the default selection changes when the
+Registry installs and settings changes make no commit, so no view changes
+(section 9.3). A conversation on the default selection changes when the
 settings or the installed extensions change; its next preparation appends the
 system delta (section 7.4). A UI showing resolved tools or a resolved model
 resolves again through `Conversation.agent()`.
@@ -3689,7 +3691,7 @@ that submission's result. Provider call IDs are not unique across a Session and
 must not serve as request IDs. Aborting or abnormally
 terminalizing the tool task cascades through the owned scope. The tool reports
 the child in its running details, for example `api.details({ conversationId })`,
-so a UI that sees the call can attach to the child's view or events.
+so a UI that sees the call can attach to the child's view.
 
 ```ts
 export const Subagent = defineExtension({
@@ -4206,7 +4208,7 @@ type LiveState = {
    * IDs ascend.
    */
   nestedTools?: {
-    /** `<parentCallId>/<key>`: the call's ID in tool events, unique because keys contain no `/`. */
+    /** `<parentCallId>/<key>`: the call's ID, unique because keys contain no `/`. */
     callId: string;
     parentCallId: string;
     /** The calling tool task, model-issued or nested; the Harness relates slots by task ID. */
@@ -4252,6 +4254,25 @@ type LiveState = {
    * after the task ended.
    */
   compactionFailure?: CompactionFailure;
+  /**
+   * Why the newest run ended without an answer, so a client can show it after the run ended. Set in the commit that
+   * ends the run; removed when a later commit starts a run.
+   */
+  runFailure?: RunFailure;
+};
+
+/** The newest run that ended without an answer. */
+type RunFailure = {
+  /** The run's task at its end. */
+  taskId: TaskId;
+  /** The run's inputs, settled `unanswered`. */
+  inputs: SubmissionId[];
+  reason: "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned";
+  /**
+   * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
+   * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
+   */
+  detail?: string;
 };
 
 type CompactionFailure = {
@@ -4321,7 +4342,26 @@ that outcome holds as `completing` (section 5.5), or the scheduler's cleanup
 It stays small: the summary text lives in the task's placement, never here. Partials are
 normalized to strict JSON before assignment. Every terminal path of a run task
 removes `run`, `generation`, and `tools` in the commit that settles the run's
-inputs. `tx.settleSubmission()` stages each input's new status
+inputs.
+
+A run that ends without an answer records why in `runFailure`, in the commit
+that settles its inputs `unanswered`:
+
+| reason | the run ended because | input settlement |
+|---|---|---|
+| `model_error` | the response failed after any retries, or a blocking or overflow compaction it needed failed; `detail` is the error text | `model_error` with the text |
+| `no_model` | no model is configured, or the configured one is not available; `detail` names it | `no_model` |
+| `aborted` | its task was aborted (`Conversation.abort()`, `abortTask()`) | `aborted` |
+| `reset` | a queued reset started a new context at the post-tools boundary (a tool's handoff continues the run) | `reset` |
+| `faulted` | the scheduler faulted its task (section 5.4); `detail` is the error message | `faulted` with the message |
+| `orphaned` | its task was aborted while no definition could take it; `detail` is the reason | the reason |
+
+The next commit that starts a run removes it. A run started in the same commit,
+the queue's next run under `afterFailedRun: "continue"` (section 6) or after a
+reset, keeps it, so the failure is shown until a later run starts. A run that
+ends with an answer, including a round whose tools all ask to terminate, leaves
+it alone. Inputs settled without a run (withdrawn, stale, aborted while
+queued, `run_failed`) are not run failures; their submission records say why. `tx.settleSubmission()` stages each input's new status
 and resolves the transaction's latest candidate submission record, falling back
 to committed state, during assembly, like task-document validation (section 3.3),
 so it is not a caller table read and works after the commit's first table write.
@@ -4922,7 +4962,7 @@ interface Session {
   // ... and the other five scopes (section 3.3), the observer before the context
 }
 interface Harness {
-  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context): Promise<Observation<ConversationView>>;
+  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context, window?: ConversationWindow): Promise<Observation<ConversationView>>;
   observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 ```
@@ -4936,7 +4976,7 @@ the graph at most one call, and a document observer one call per change at its
 address: a commit that retires the document and creates it again gives two, the
 retirement and then the new incarnation's `[["r", value]]`. The task graph also
 advances without a commit, when a registry change or a failed migration changes
-a task's `blocked` reason (section 9.5): that call runs on the Session line,
+a task's `blocked` reason (section 9.4): that call runs on the Session line,
 outside any `adopt`, with a context of its own. A document observer follows its
 address as a document watch does, and `observeDoc()` gives `undefined` for an
 absent one. `end` comes once: when the Session closes (`undefined`) or fails
@@ -4960,8 +5000,9 @@ and returns: no awaits, no Session calls, no throws, and quick, as its time is
 part of every commit; so does `end` when a task ends. One that throws anyway is
 reported as `listener_error`, detached, and ended with the error; the commit and
 the other observers are not affected. The change object is plain data, shared by
-every observer of a view and by the watches built on it, and must not be
-mutated.
+every observer of a document or the task graph and by the watches built on it,
+and must not be mutated; each observer of a conversation view gets its own, for
+its own window (section 9.3), sharing the document values.
 
 ### 9.2 `watchDoc`
 
@@ -5033,227 +5074,188 @@ rejection is observed.
 
 ### 9.3 Conversation view
 
-The public view is a fixed structural mount of the conversation's active
+The public view is a fixed structural mount of a window over the conversation's
 transcript and its built-in documents:
 
 ```ts
 type ConversationView = {
   readonly conversation: ConversationRecord;
-  /** Raw active entries, as `ContextView.entries` (section 2.1): the head marker, then the non-head entries from its head. */
+  /**
+   * A window over the transcript, its fork-aware history (`Conversation.entries()`), in entry ID order. Head markers
+   * such as compaction summaries sit where they were written; their `head` tells where the entries they summarize end.
+   */
   readonly entries: readonly EntryRecord[];
+  /** ID of the entry just before the window; absent when the window starts the transcript. */
+  readonly before?: EntryId;
   /** `pi.agent`, `pi.live`, `pi.inbox`, `pi.provider`, and `pi.usage`, keyed by kind; absent documents are absent. */
   readonly docs: Readonly<Record<string, JsonObject>>;
 };
+
+type ConversationWindow = {
+  /**
+   * Where the first value's window starts, inclusive, such as right after the newest entry a client has
+   * (`ConversationTranscript.resume`). It selects only that first value.
+   */
+  readonly from?: EntryId;
+  /** Default 50; an integer, at least 1. */
+  readonly min?: number;
+  /** Default `2 * min`; an integer, at least `min`. */
+  readonly max?: number;
+};
+
+interface Conversation {
+  watch(context: Context, window?: ConversationWindow): Promise<ConversationWatch>;
+}
+interface Harness {
+  observeConversation(id: ConversationId, observer: Observer<ConversationView>, context: Context, window?: ConversationWindow): Promise<Observation<ConversationView>>;
+}
 ```
 
 These kinds and their fields are public protocol. Third-party documents are
-exposed through their own Chord objects, not mounted.
+exposed through their own Chord objects, not mounted. Everything a renderer
+draws is state in this value: the transcript in `entries`, the run and its
+presentation in `pi.live` (`run`, `generation`, `tools`, `nestedTools`,
+`compactions`, `compactionFailure`, `runFailure`, section 8.2), the queue in
+`pi.inbox`, the agent in `pi.agent`, spend in `pi.usage`. A renderer renders
+the newest value; it never assembles state from a stream of events.
+
+**The window.** Each watch and observer has its own window. It starts with the
+newest `min` entries and the ID of the entry before them in `before`. With
+`from`, it starts at `from` instead, when at most `max` entries are at or after
+it; then `before` is the newest entry before `from`, and a window that resumes
+right after the newest entry starts empty. Otherwise it starts at the newest
+`min`, and `before` shows the client the entries it missed. `from` only picks
+that first value: every entry committed after the attachment is appended,
+whatever its ID, so a `from` past the newest entry, such as one a client
+computed against another replica, gives an empty window whose `before` is the
+newest entry, and then every entry that follows. The window has a stable start,
+so new entries are appends. When it would hold more than `max`
+entries, its oldest leave in one splice down to `min`, and `before` moves to
+the last one that left:
+
+```text
+min 3, max 5; the window holds 4..7, before 3
+commit appends 8:  ["p", ["entries"], 4, 0, [8]]                     window 4..8
+commit appends 9:  ["p", ["entries"], 5, 0, [9]], ["p", ["entries"], 0, 3, []], ["s", ["before"], 6]
+                                                                     window 7..9, before 6
+```
+
+A commit that appends more than `max` entries at once keeps its newest `min`.
+A first value, and an overflow replacement (section 9.2), therefore hold at
+most `max` entries, never the whole transcript. Entry IDs are ordered but not
+contiguous: a client never counts entries or infers ranges from IDs. `before`
+tells whether a window continues what the client has, and
+`Conversation.entries()` with `minEntryId`/`maxEntryId` and its cursor fetches
+what lies in between; resuming from right after the newest entry and
+`maxEntryId: oldest - 1` are exclusive bounds, the only arithmetic on IDs a
+client does, and `ConversationTranscript` does both. A window with
+bounds that are not integers, or `max` below `min`, rejects with a
+`RangeError`.
+
+Head markers stay in place: a compaction summary, a reset, or a handoff is an
+appended entry like any other. The view does not derive the active
+transcript; `Conversation.context()` does (section 2.1).
 
 The Harness keeps at most one mount per conversation. The first `watch()` or
-event attachment builds its revision on the Session line from the
-committed active transcript and documents; the mount is dropped when its last
+observer builds its documents on the Session line, and each attachment reads
+its window there with bounded scans; the mount is dropped when its last
 observer detaches. A mount derives each next revision from the Session's
 commits as memory adopts them, for a stored commit inside Storage's `adopt`
 (section 4) and for a held one when memory adopts it (section 4.1), like
-`watchDoc()`: it shows committed state,
-including deferred commits before they are stored (section 4.1). One publication that
-touches the conversation yields one Chord batch:
+`watchDoc()`: it shows committed state, including deferred commits before they
+are stored (section 4.1). One publication that touches the conversation yields
+one Chord batch per observer: the document operations, applied once and
+shared, then that observer's entry splices:
 
 ```text
 document op ["s", ["generation", "message"], value]
 -> view op ["s", ["docs", "pi.live", "generation", "message"], value]
 ```
 
-An appended entry without a head is a splice at the end of `entries`. An
-appended head marker `H` makes the entries `H` followed by the current non-head
-entries at or after `H.head`: the kept entries stay, and splices remove the
-others and insert `H` at the front. Every kept entry is already mounted because
-Harness writers never target a head before the current range: resets and
-handoffs head themselves, compaction summaries target a kept entry of the
-current range, and head writes that reach further back are stale (section 6). A raw head write that targets further back shows only the
-mounted entries (section 12).
 Document creation and retirement set and delete the `docs` key. Parent entries
 through `parent.at` are immutable, so a child's mount follows only its own
 conversation. A publication that touches nothing mounted creates no revision; a
 redundant nonempty batch remains a real publication. Mounted document revisions
-are structurally shared under the trusted immutability contract. The mount
-performs no semantic projection and owns no persistence.
+are structurally shared under the trusted immutability contract, and an entry
+that stays in a window keeps its identity across revisions. The cost of a
+commit is its operations plus, per observer that gets entries, one copy of its
+window, at most `max` entries. The mount performs no semantic projection and
+owns no persistence.
 
 `Conversation.watch()` exposes the mount through the serialized watch of
 section 9.2, with folded pending commits and a full-value overflow replacement;
 `Harness.observeConversation()` attaches a synchronous observer of the same mount
 (section 9.1). A view never retires, so its changes never set `retired`.
 
-### 9.4 Agent events (experimental)
-
-`watchEvents(harness, conversationId, context): Promise<AgentEventStream>`,
-exported from the package root, is an experimental adapter that
-translates one conversation's committed publications into agent events shaped
-like the coding agent's `AgentSessionEvent`s. It owns no tracker or persistence,
-covers exactly one conversation (not its owned subtree), and emits an event only
-after the commit that makes it true. Its protocol may change without notice.
+**A client's transcript.** A window only ever adds to what a client has seen:
+entries never change once committed, and those that leave the window stay with
+the client. `ConversationTranscript` keeps them, as a layer over any view,
+wherever it comes from (a watch, or a replica of it on another host):
 
 ```ts
-/**
- * Which call a tool event is about. `toolCallId` is the provider's ID for a model-issued call and
- * `<parent call ID>/<key>` for a nested one; consumers match it and never parse it. `taskId` is the call's tool task,
- * absent for a call that never got one. A nested call also names its caller by call ID and by tool task.
- */
-type ToolEventCall = {
-  toolCallId: string;
-  toolName: string;
-  taskId?: TaskId;
-  parentToolCallId?: string;
-  parentTaskId?: TaskId;
-};
+type TranscriptItem =
+  | { readonly kind: "entry"; readonly entry: EntryRecord }
+  /** Entries strictly between `after` and `upTo` are missing: render "load more". */
+  | { readonly kind: "gap"; readonly after: EntryId; readonly upTo: EntryId }
+  /** The transcript continues above: render "load earlier". */
+  | { readonly kind: "earlier" };
 
-type AgentEvent =
-  | {
-      type: "snapshot";
-      entries: readonly EntryRecord[];
-      run?: { inputs: readonly SubmissionId[] };
-      /** Current generation attempt: its in-flight partial, retry backoff, or deferred poll. */
-      generation?: { attempt: number; message?: AssistantMessage; retry?: { at: number; error: string }; deferred?: { pollAt: number } };
-      tools: readonly ToolSlot[];
-      /** `pi.live.nestedTools` (section 8.2). */
-      nestedTools: readonly NestedToolSlot[];
-      /** `pi.live.compactions` (section 8.2). */
-      compactions: readonly CompactionStatus[];
-      /** `pi.live.compactionFailure` (section 8.2). */
-      compactionFailure?: CompactionFailure;
-      inbox: readonly { id: SubmissionId; mode: InboxItem["mode"] }[];
-      /** `pi.agent`; `{}` when absent. */
-      agent: AgentState;
-      usage: UsageState;
-    }
-  | { type: "run_start"; inputs: readonly SubmissionId[] }
-  | { type: "run_end"; inputs: readonly SubmissionId[] }
-  | { type: "turn_start" }
-  | { type: "turn_end" }
-  | { type: "message_start"; message: Message }
-  | { type: "message_update"; usage: Usage; changes: readonly MessageChange[] }
-  | { type: "message_end"; entry: EntryRecord }
-  | ({ type: "tool_execution_start"; args: JsonObject } & ToolEventCall)
-  | ({
-      type: "tool_execution_update";
-      /** A front trim and then an append of the retained window, or its replacement. */
-      output?: { trimStart?: number; append?: string } | { set: string };
-      details?: JsonValue;
-      diagnostics?: readonly ToolDiagnostic[];
-    } & ToolEventCall)
-  /** A model-issued call ends with its `entry`, a nested call with its `result`; see below for when neither. */
-  | ({ type: "tool_execution_end"; entry?: EntryRecord; result?: NestedToolExecutionResult } & ToolEventCall)
-  | { type: "inbox_update"; items: readonly { id: SubmissionId; mode: InboxItem["mode"] }[] }
-  | { type: "submission"; record: SubmissionRecord }
-  | { type: "auto_retry_start"; attempt: number; at: number; errorMessage: string }
-  | { type: "auto_retry_end"; attempt: number }
-  | { type: "deferred_poll"; pollAt: number }
-  | { type: "entry_appended"; entry: EntryRecord }
-  | { type: "agent_changed"; agent: AgentState }
-  | { type: "usage_changed"; usage: UsageState }
-  | { type: "task_failed"; taskId: TaskId; kind: string; message: string }
-  | { type: "compaction_start"; taskId: TaskId; reason: CompactionReason; blocking: boolean }
-  /** The task's receipt tells whether it produced a summary; the summary entry has its own events. */
-  | { type: "compaction_end"; taskId: TaskId; reason: CompactionReason; error?: string };
+/** The conversation view as a renderer sees it: `items` instead of the window. */
+type TranscriptView = Omit<ConversationView, "entries" | "before"> & { readonly items: readonly TranscriptItem[] };
 
-/** One change to the in-flight assistant message, relative to that message. */
-type MessageChange =
-  | { type: "text_start" | "thinking_start" | "toolcall_start"; contentIndex: number; block: AssistantMessage["content"][number] }
-  | { type: "text_delta" | "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_delta"; contentIndex: number; path: readonly (string | number)[]; delta: string }
-  | { type: "block"; contentIndex: number; block: AssistantMessage["content"][number] }
-  | { type: "message"; message: AssistantMessage };
+type EntryLoader = (query: Omit<EntryQuery, "conversationId">, limit: number, context: Context) => Promise<Page<EntryRecord, Cursor>>;
 
-interface AgentEventStream {
-  /** The `snapshot` event at attachment. */
-  readonly snapshot: Extract<AgentEvent, { type: "snapshot" }>;
-  /** Each call's `value` is one commit's batch, or a `snapshot` after an overflow (Chord's `NativeWatchChange`). */
-  start(listener: (change: { readonly value: readonly AgentEvent[] }, context: Context) => Promise<void>): void;
-  stop(): Promise<WatchEnd>;
-  readonly closed: Promise<WatchEnd>;
+class ConversationTranscript {
+  constructor(load: EntryLoader, options?: { readonly pageSize?: number }); // default 50
+  /** Call with every value of the view. */
+  merge(view: ConversationView): TranscriptView;
+  /** The page before the oldest entry held. */
+  loadEarlier(context: Context): Promise<TranscriptView>;
+  /** The next page of a gap, from its start. */
+  fillGap(gap: Extract<TranscriptItem, { kind: "gap" }>, context: Context): Promise<TranscriptView>;
+  /** The ID the transcript reaches: its newest entry, or a later empty window's `before`. */
+  readonly newest: EntryId | undefined;
+  /** `{ from }` right after `newest`, `{}` for an empty transcript, undefined before the first merge. */
+  readonly resume: ConversationWindow | undefined;
 }
 ```
 
-Every event is relative to the `snapshot` and the events before it, never to
-Durable's document layout. `snapshot` replaces everything a consumer holds; every
-other event applies on top of it. Attachment captures the snapshot and
-registers for later publications atomically on the Session line.
+```ts
+const transcript = new ConversationTranscript((query, limit, ctx) => conversation.entries(query, limit, undefined, ctx));
+const watch = await conversation.watch(context);
+render(transcript.merge(watch.value));
+watch.start(async ({ value }) => render(transcript.merge(value)));
+// A marker scrolled into view:
+render(await transcript.loadEarlier(context));
+// Reconnect after a drop:
+const resumed = await conversation.watch(context, transcript.resume);
+```
 
-Events derive from committed changes:
+A window whose `before` lies past the newest entry the client has does not
+continue it: after a stall, an overflow, or a reconnect, the entries in between
+become a gap. While the client keeps up there is never one: the window only
+appends, and its splice removes entries the client already holds.
+`fillGap()` loads `pageSize` entries from the gap's start and shrinks it, or
+removes it once nothing is missing; `loadEarlier()` loads the page before the
+oldest entry held, and the `earlier` item disappears once a page reaches the
+transcript's start. A window, or a page, that covers part of a gap fills that
+part. Items are in ID order: `earlier` first, then entries, each gap before
+the entry after it.
 
-- `run_start`/`run_end`: `pi.live.run` appears, is removed, or is replaced by a
-  successor run whose first input differs. Steers joining the current run and
-  handovers between its tasks are not run events. The inputs' outcomes are
-  `submission` events.
-- `turn_start`: a `pi.generation` task is created. `turn_end`: a generation's
-  outcome is committed, when it holds `completing` or becomes terminal,
-  whichever comes first, so a successor created at hold starts after it.
-- `message_start`: the first committed partial of an attempt, or, for a message
-  entry without a committed partial, the entry itself; `message_end` follows for
-  every entry with `model` messages. Generation commits a partial only once it has
-  content, and every built-in path that clears one appends its entry, so each
-  started message ends with its entry. Entries without messages are
-  `entry_appended`.
-- `message_update`: the Chord operations on the committed partial, translated:
-  an insertion into `content` starts blocks, an append to a block's `text` or
-  `thinking` is a delta, an append to a string inside a tool call's `arguments`
-  is a `toolcall_delta` with the path relative to `arguments`, any other change
-  inside a block sends that `block`, which already holds the batch's later
-  changes to it, and any other change to `content` sends the whole `message`.
-  Each update carries the partial's current `usage`, as the coding agent's JSON
-  mode does; a change of only `usage` sends no changes. Only deltas travel, so throttled
-  partials cause no write amplification on the wire.
-- `tool_execution_start`: a slot becomes `running`; `args` come from the tool
-  task's intent checkpoint in the same commit. A slot that becomes `done`
-  without running (a call not offered, invalid arguments, a block, a fault
-  before intent) gets only `tool_execution_end`. `tool_execution_update`: output
-  appends, front trims, and replacements of the slot's retained window, and the
-  slot's current `details` and `diagnostics` when they change; removed ones, as
-  when a safe replay restarts the tool, send `null` and `[]`.
-  `tool_execution_end`: the slot becomes `done`, with its `pi.tool-result`
-  entry, which carries the diagnostics, or without one after a fault or
-  orphan. An unfinished slot that disappears because its run ended ends with the
-  result entry appended in the same commit, as for the unstarted calls of an
-  aborted round, directly before its `message_start`, or without an entry.
-  Nested slots produce the same events with `parentToolCallId`; a nested call
-  ends with its `result`, taken from the `NestedCallDoc` value its terminal
-  commit published, or without one after a fault or orphan or when its slot
-  disappears unfinished. Snapshots show done nested slots with their summary,
-  not their result; a late subscriber reads a live caller's results from its
-  `NestedCallDoc`, keyed by call key (the slot's `callId` after `<parentCallId>/`).
-- `inbox_update`, `agent_changed`, `usage_changed`: the document changed; a
-  retired one reads as its initial value, as in a snapshot. Registry installs
-  and settings changes make no commit and emit nothing; a UI showing resolved
-  tools or a resolved model resolves again through `Conversation.agent()`.
-- `auto_retry_start`/`auto_retry_end`, `deferred_poll`: `pi.live.generation`
-  gains or drops `retry`, or gains `deferred` or moves its `pollAt`.
-- `task_failed`: a task of the conversation settles `faulted` or `orphaned`.
-- `compaction_start`/`compaction_end`: a status appears in or disappears from
-  `pi.live.compactions`. `compaction_end` carries `error` when the same commit
-  recorded the task in `pi.live.compactionFailure`. A retry backoff shows only
-  in the snapshot's `compactions`. A queued summary is placed later with its own
-  `message_start`/`message_end` and `submission` events.
+`items` is a plain array. A merge costs O(items), never re-sorts or
+re-fetches, and one that adds nothing returns the previous `items` array; with
+the same `docs` and `conversation` it returns the previous view itself.
+Concurrent `loadEarlier()` calls, and concurrent `fillGap()` calls for one gap,
+share one load, also when one passes a gap descriptor that has shrunk since; a
+load that rejects, or whose loader throws, is not kept, so the next call loads
+again. A page without a next cursor, or without items, ends the range: the gap
+closes, or the transcript's start is reached. An empty window adds nothing.
+`loadEarlier()` before the first merge rejects; after the start is reached, and
+`fillGap()` for a gap that is gone, return the current view.
+Keeping the scroll position when items are inserted above is the renderer's
+job.
 
-One commit produces one batch, in this order: `tool_execution_start`,
-`message_start` of a first partial, `message_update`, `tool_execution_update`,
-and retry/deferred events; then entries in append order with their
-`message_start`/`message_end` or `entry_appended`, where a tool result's
-`tool_execution_end` directly precedes its `message_start`, as in the coding
-agent, and the `tool_execution_end` of nested calls, children first, precede
-the entries; then the `tool_execution_end` of tools ending without an entry;
-then `compaction_end`, `task_failed`, `turn_end`, `run_end`; then `submission`
-events in ID order; then `inbox_update`, `agent_changed`, and `usage_changed`;
-and last `compaction_start`, `run_start`, and `turn_start`. A stream buffers at most 100 undelivered
-batches; adding another replaces every undelivered batch with one `snapshot` of
-the newest committed state. The stream therefore converges but does not promise
-every transition; `Submission.wait()` reports exact outcomes. A reconnecting
-consumer attaches again and starts from its `snapshot`; nothing is replayed.
-Transport backpressure and disconnect policy belong to the consumer.
-
-Print mode awaits its own input `Submission` and prints its answer. A TUI
-renders `ConversationView`; events may drive transient animation.
-
-### 9.5 Task graph view
+### 9.4 Task graph view
 
 The task graph view shows every live task of the Session as one structural
 value, for UIs and debugging: what runs, what waits for what, and which
@@ -5574,8 +5576,7 @@ may not have committed, so a host that resubmits after reopening reuses its
   and every wait that starts later rejects with `SessionFailed`, whose `cause` is
   the first error; so does every Storage call still underway when it returns,
   whatever it returned.
-- Watches and event streams end with `{ reason: "failed", error }` and keep
-  their last value.
+- Watches end with `{ reason: "failed", error }` and keep their last value.
 - Running task invocations get their abort signal. `HarnessOptions.onReport`
   gets the error once, after the Session is sealed, so a report handler that
   calls back finds it failed.
@@ -5785,8 +5786,8 @@ These are contracts, not invitations to add defensive machinery:
   messages, can misjudge; the Harness estimate uses entry order (section 8.3).
 - **Raw head writes into the past:** a head written directly with `tx.appendEntry()`
   that targets an entry before the conversation's active range changes model
-  context, but a mounted view keeps only the entries it already holds until the
-  mount is rebuilt. Use a write submission, whose stale check rejects it.
+  context in ways a queued write would not. Use a write submission, whose stale
+  check rejects it.
 - **Double-counted subagent spend:** a tool that runs an owned conversation must
   not report that conversation's usage in its result; the child's `pi.usage`
   already counts it, and subtree sums would count it twice.

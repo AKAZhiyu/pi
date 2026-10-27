@@ -11,7 +11,6 @@ import {
 	MemoryStorage,
 	StorageRequestError,
 	type TaskId,
-	watchEvents,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { safeNow } from "../src/harness/harness.ts";
@@ -95,8 +94,8 @@ describe("a failed Storage call", () => {
 		const task = harness.waitForTask(id, context);
 		const idle = harness.waitForIdle(context);
 		const watch = (await harness.watchDoc(LiveDoc, root.id, context))!;
-		const stream = await watchEvents(harness, root.id, context);
-		stream.start(async () => {});
+		const view = await root.watch(context);
+		view.start(async () => {});
 
 		const failure = new Error("disk gone");
 		storage.failNextCommit(failure);
@@ -107,7 +106,7 @@ describe("a failed Storage call", () => {
 		await expect(task).rejects.toMatchObject(failed);
 		await expect(idle).rejects.toMatchObject(failed);
 		expect(await watch.closed).toEqual({ reason: "failed", error: failure });
-		expect(await stream.closed).toEqual({ reason: "failed", error: failure });
+		expect(await view.closed).toEqual({ reason: "failed", error: failure });
 		// Every later call, and a wait that starts now.
 		await expect(harness.getTask(id, context)).rejects.toMatchObject(failed);
 		await expect(harness.waitForIdle(context)).rejects.toMatchObject(failed);
@@ -487,8 +486,9 @@ describe("listener and report errors", () => {
 		const failure = new Error("observer broke");
 		await views.attach(
 			root.id,
-			async () => ({
-				publication: () => {
+			undefined,
+			() => ({
+				advance: () => {
 					throw failure;
 				},
 				end: () => {},

@@ -21,7 +21,6 @@ import type {
 	EntryId,
 	NextTaskState,
 	SubmissionId,
-	SubmissionSettlement,
 	TaskId,
 	TaskOutcome,
 	TaskRuntime,
@@ -31,7 +30,7 @@ import type {
 import { addTools, sectionExtension } from "./agent.ts";
 import { compactionPolicy, createCompaction, estimateContext, selectCut } from "./compaction.ts";
 import { applyBoundary, type Boundary, prepareBoundary, withdrawQueuedInputs } from "./inbox.ts";
-import { endRun, LiveDoc, type LiveState, PROGRESS_COMMIT, type ToolSlot } from "./live.ts";
+import { endRun, LiveDoc, type LiveState, PROGRESS_COMMIT, type RunEnd, type ToolSlot } from "./live.ts";
 import { PartialChanges, type PartialMessage } from "./partial-changes.ts";
 import { planSystemEntries, renderSections, replaySections } from "./prompt.ts";
 import { ensureProviderSessionId } from "./provider.ts";
@@ -396,7 +395,12 @@ async function failNoModel(runtime: Runtime, ref: ModelRef | undefined, context:
 	await runtime.commit(async (tx) => {
 		const failure = await prepareFailure(tx, runtime);
 		const live = await tx.doc(LiveDoc, runtime.conversationId);
-		await endFailedRun(tx, runtime, live, failure, { status: "unanswered", reason: "no_model" });
+		await endFailedRun(tx, runtime, live, failure, {
+			status: "unanswered",
+			reason: "no_model",
+			detail: message,
+			settlement: { status: "unanswered", reason: "no_model" },
+		});
 		return { status: "terminal", outcome: { status: "failed", error: { message, detail: { reason: "no_model" } } } };
 	}, context);
 }
@@ -420,14 +424,14 @@ async function endFailedRun(
 	runtime: Runtime,
 	live: Draft<LiveState>,
 	failure: Failure,
-	settlement: SubmissionSettlement,
+	end: Extract<RunEnd, { status: "unanswered" }>,
 ): Promise<void> {
 	const conversationId = runtime.conversationId;
-	endRun(tx, live, runtime.taskId, settlement);
+	endRun(tx, live, runtime.taskId, end);
 	if (failure.policy === "withdraw") await withdrawQueuedInputs(tx, conversationId, "run_failed");
 	if (failure.boundary === undefined) return;
 	const { users } = await applyBoundary(tx, failure.boundary, "final", runtime.now());
-	if (users.length > 0) await startRun(tx, conversationId, live, users);
+	if (users.length > 0) await startRun(tx, conversationId, live, users, { keepFailure: true });
 }
 
 /**
@@ -747,7 +751,7 @@ async function finishToolRound(
 			if (reset) {
 				// The queued reset cut the run's context before an answer.
 				endRun(tx, live, runtime.taskId, { status: "unanswered", reason: "reset" });
-				if (users.length > 0) await startRun(tx, conversationId, live, users);
+				if (users.length > 0) await startRun(tx, conversationId, live, users, { keepFailure: true });
 			} else {
 				delete live.tools;
 				delete live.nestedTools;
@@ -772,14 +776,19 @@ async function appendAssistant(
 	return tx.appendEntry(AssistantEntry, conversationId, { model: [message] });
 }
 
-/** Start a run for `inputs`, placed input submissions: a new generation takes `pi.live.run`. */
+/**
+ * Start a run for `inputs`, placed input submissions: a new generation takes `pi.live.run`. Removes `runFailure`, unless
+ * `keepFailure`: a run started in the commit that ended the failed one keeps its failure.
+ */
 export async function startRun(
 	tx: Tx,
 	conversationId: ConversationId,
 	live: Draft<LiveState>,
 	inputs: SubmissionId[],
+	options?: { readonly keepFailure?: boolean },
 ): Promise<void> {
 	live.run = { taskId: await createGeneration(tx, conversationId, { submissionIds: inputs }), inputs };
+	if (options?.keepFailure !== true) delete live.runFailure;
 }
 
 /** A generation owned by its conversation. */

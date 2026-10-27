@@ -20,7 +20,6 @@ import {
 	type ToolRegistration,
 	ToolResultEntry,
 	ToolTask,
-	watchEvents,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../src/env/node.ts";
@@ -163,25 +162,15 @@ describe("structured output", () => {
 				if (result !== undefined && change.ops.length > 0) stored.push(result as unknown as JsonValue);
 			}
 		});
-		const stream = await watchEvents(harness, root.id, context);
-		const ends: NestedToolExecutionResult[] = [];
-		stream.start(async ({ value: batch }) => {
-			for (const event of batch) {
-				if (event.type === "tool_execution_end" && event.parentToolCallId !== undefined) {
-					ends.push(event.result as NestedToolExecutionResult);
-				}
-			}
-		});
 		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
 		await harness.waitForIdle(context);
-		await stream.stop();
 		await harness.close(context);
 
 		expect(received[0]).toMatchObject({ structuredOutput: "a", isError: false });
 		expect(received[1]).toMatchObject({ structuredOutput: null, isError: false });
 		expect(received[0]).not.toHaveProperty("output");
+		// A client reads a live caller's nested results from the same documents.
 		expect(stored).toEqual(received);
-		expect(ends).toEqual(received);
 	});
 
 	it("gives callers a schema tool's validated structured output, which the transcript does not store", async () => {

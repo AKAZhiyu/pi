@@ -47,7 +47,7 @@ import type {
 } from "../types.ts";
 import type { TaskGraph, TaskGraphWatch } from "./task-graph.ts";
 import type { UsageState } from "./usage.ts";
-import type { ConversationView } from "./view.ts";
+import type { ConversationView, ConversationWindow } from "./view.ts";
 
 /** Provider and model ID resolved through pi-ai `Models`. */
 export type ModelRef = {
@@ -795,10 +795,11 @@ export interface Conversation {
 	 */
 	waitForIdle(context: Context): Promise<void>;
 	/**
-	 * The structural view (spec §9.3) as a serialized watch; commits made while its listener runs arrive folded. Built on
-	 * the same mount as `Harness.observeConversation()`.
+	 * The structural view (spec §9.3) as a serialized watch; commits made while its listener runs arrive folded. Its
+	 * `entries` are a window over the transcript, as `window` says: the newest 50 by default, then appends, dropping the
+	 * oldest past 100. Built on the same mount as `Harness.observeConversation()`.
 	 */
-	watch(context: Context): Promise<ConversationWatch>;
+	watch(context: Context, window?: ConversationWindow): Promise<ConversationWatch>;
 }
 
 export type ConversationWatch = WatchHandle<ConversationView>;
@@ -856,23 +857,24 @@ export interface Harness extends Session {
 	/** Session total: every conversation's `pi.usage` summed. */
 	usage(context: Context): Promise<UsageState>;
 	/**
-	 * Every live task with its owner edge, status, and owned conversations (spec §9.5), as a serialized watch; commits
+	 * Every live task with its owner edge, status, and owned conversations (spec §9.4), as a serialized watch; commits
 	 * made while its listener runs arrive folded.
 	 */
 	watchTaskGraph(context: Context): Promise<TaskGraphWatch>;
 	/**
 	 * Attach a synchronous `Observer` to a conversation's structural view (spec §9.3), atomically on the Session line,
 	 * for adapters: `advance` gets each next revision with its operations as memory adopts the commit, inside Storage's
-	 * `adopt` for a stored one and before it is stored for a deferred one, so it only records it. `context` governs only
-	 * the attachment.
+	 * `adopt` for a stored one and before it is stored for a deferred one, so it only records it. `window` as for
+	 * `Conversation.watch()`; each observer has its own. `context` governs only the attachment.
 	 */
 	observeConversation(
 		id: ConversationId,
 		observer: Observer<ConversationView>,
 		context: Context,
+		window?: ConversationWindow,
 	): Promise<Observation<ConversationView>>;
 	/**
-	 * Attach a synchronous `Observer` to the task graph (spec §9.5), as `observeConversation()` does to a view. A
+	 * Attach a synchronous `Observer` to the task graph (spec §9.4), as `observeConversation()` does to a view. A
 	 * `blocked` reason that changes without a commit (a registry change, a failed migration) advances it on the Session
 	 * line outside any commit and `adopt`, with the background context.
 	 */

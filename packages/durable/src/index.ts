@@ -26,14 +26,6 @@ export {
 } from "./harness/compaction.ts";
 export { defineExtension, defineTool, hook, section, wrapSection, wrapTool } from "./harness/define.ts";
 export {
-	type AgentEvent,
-	type AgentEventStream,
-	type MessageChange,
-	type SnapshotEvent,
-	type ToolEventCall,
-	watchEvents,
-} from "./harness/events.ts";
-export {
 	type GenerationCheckpoint,
 	type GenerationInput,
 	type GenerationResult,
@@ -48,6 +40,8 @@ export {
 	type LiveState,
 	type NestedToolSlot,
 	type NestedToolSummary,
+	type RunFailure,
+	type RunFailureReason,
 	type ToolSlot,
 } from "./harness/live.ts";
 export { ProviderDoc, type ProviderState } from "./harness/provider.ts";
@@ -63,6 +57,13 @@ export {
 	type ToolTaskInput,
 	type ToolTaskResult,
 } from "./harness/tool.ts";
+export {
+	ConversationTranscript,
+	type ConversationTranscriptOptions,
+	type EntryLoader,
+	type TranscriptItem,
+	type TranscriptView,
+} from "./harness/transcript.ts";
 export type {
 	AfterFailedRun,
 	Agent,
@@ -123,7 +124,7 @@ export type {
 	Wrap,
 } from "./harness/types.ts";
 export { UsageDoc, type UsageState } from "./harness/usage.ts";
-export type { ConversationView } from "./harness/view.ts";
+export type { ConversationView, ConversationWindow } from "./harness/view.ts";
 export { createSession } from "./session/session.ts";
 export { MemoryStorage } from "./storage/memory.ts";
 export { defineTask } from "./tasks.ts";

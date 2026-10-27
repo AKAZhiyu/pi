@@ -44,7 +44,7 @@ export type ToolSlot = SlotProgress & {
 
 /**
  * Presentation of one nested call: a call a running tool made through `executeTool()`. `callId` is
- * `<parentCallId>/<key>`, the call's ID in tool events and unique because keys contain no `/`. The Harness relates
+ * `<parentCallId>/<key>`, the call's ID, unique because keys contain no `/`. The Harness relates
  * slots by task ID: `taskId` is the call's tool task, `parentTaskId` the calling one, model-issued or nested.
  */
 export type NestedToolSlot = SlotProgress & {
@@ -87,6 +87,32 @@ export type CompactionFailure = {
 	error: string;
 };
 
+/**
+ * Why a run ended without an answer:
+ * - `model_error`: the model's response failed, after any retries, or the compaction a request needed failed;
+ * - `no_model`: no model is configured, or the configured one is not available;
+ * - `aborted`: the run was aborted (`Conversation.abort()`, `abortTask()`);
+ * - `reset`: a queued reset started a new context at the post-tools boundary, before an answer (a tool's handoff
+ *   continues the run);
+ * - `faulted`: the run's task threw where it cannot recover, or storage rejected its commit;
+ * - `orphaned`: the run's task was aborted while no registered definition could take it.
+ */
+export type RunFailureReason = "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned";
+
+/** The newest run that ended without an answer (spec §8.2). */
+export type RunFailure = {
+	/** The task that ended the run: the run's task at its end. */
+	taskId: TaskId;
+	/** The run's inputs, settled `unanswered`. */
+	inputs: SubmissionId[];
+	reason: RunFailureReason;
+	/**
+	 * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
+	 * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
+	 */
+	detail?: string;
+};
+
 /** Built-in live conversation state: run control and presentation of the current generation and tool round. */
 export type LiveState = {
 	/** Run control: the task that settles the run's inputs, and those inputs; present exactly while busy. */
@@ -115,6 +141,12 @@ export type LiveState = {
 	 * removes it; one that is aborted or finds nothing to compact leaves it.
 	 */
 	compactionFailure?: CompactionFailure;
+	/**
+	 * Why the newest run ended without an answer, so a client can show it after the run ended. Set in the commit that
+	 * ends the run; removed when a later commit starts a run. A run started in the same commit, by
+	 * `afterFailedRun: "continue"` or after a reset, keeps it.
+	 */
+	runFailure?: RunFailure;
 };
 
 export const LiveDoc = defineDoc<LiveState>({
@@ -147,13 +179,36 @@ const RUN_TASK_KINDS: ReadonlySet<string> = new Set(["pi.generation"]);
 const TOOL_TASK_KIND = "pi.tool";
 const COMPACTION_TASK_KIND = "pi.compaction";
 
+/** How a run ends: with an answer, or without one, settling its inputs `unanswered` and recording why. */
+export type RunEnd =
+	| { readonly status: "done"; readonly answer: EntryId }
+	| {
+			readonly status: "unanswered";
+			readonly reason: RunFailureReason;
+			readonly detail?: string;
+			/** The inputs' settlement; default `unanswered` with `reason` and `detail`. */
+			readonly settlement?: SubmissionSettlement;
+	  };
+
 /**
- * End the run owned by `taskId`: settle each of its inputs and remove `run`. Always removes `generation`, `tools`, and
- * `nestedTools`, whose presentation belongs to the ending run.
+ * End the run owned by `taskId`: settle each of its inputs, remove `run`, and, without an answer, record
+ * `runFailure`. Always removes `generation`, `tools`, and `nestedTools`, whose presentation belongs to the ending run.
  */
-export function endRun(tx: Tx, live: Draft<LiveState>, taskId: TaskId, settlement: SubmissionSettlement): void {
+export function endRun(tx: Tx, live: Draft<LiveState>, taskId: TaskId, end: RunEnd): void {
 	if (live.run?.taskId === taskId) {
-		for (const id of live.run.inputs) tx.settleSubmission(id, settlement);
+		const inputs = [...live.run.inputs];
+		if (end.status === "done") {
+			for (const id of inputs) tx.settleSubmission(id, { status: "done", answer: end.answer });
+		} else {
+			const { reason, detail } = end;
+			const settlement = end.settlement ?? {
+				status: "unanswered",
+				reason,
+				...(detail === undefined ? {} : { detail }),
+			};
+			for (const id of inputs) tx.settleSubmission(id, settlement);
+			live.runFailure = { taskId, inputs, reason, ...(detail === undefined ? {} : { detail }) };
+		}
 		delete live.run;
 	}
 	delete live.generation;
@@ -279,6 +334,11 @@ export async function settleSchedulerOutcome(
 		record.id,
 		outcome.status === "faulted"
 			? { status: "unanswered", reason: "faulted", detail: outcome.error.message }
-			: { status: "unanswered", reason: outcome.reason },
+			: {
+					status: "unanswered",
+					reason: "orphaned",
+					detail: outcome.reason,
+					settlement: { status: "unanswered", reason: outcome.reason },
+				},
 	);
 }

@@ -1153,7 +1153,7 @@ describe("owned conversations from tools and supervisors", () => {
 		const childConversation = (await harness.conversation(child!, context))!;
 		await childConversation.waitForIdle(context);
 		const childLive = await harness.snapshot(LiveDoc, child!, context);
-		expect(childLive).toEqual({});
+		expect(childLive).toEqual({ runFailure: expect.objectContaining({ reason: "aborted" }) });
 		const childInputs = (await harness.inspect(context)).submissions.filter((s) => s.conversationId === child);
 		expect(childInputs).toEqual([]);
 		await harness.waitForIdle(context);

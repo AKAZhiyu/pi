@@ -74,7 +74,7 @@ import type {
 } from "./types.ts";
 import { addUsageState, UsageDoc, type UsageState } from "./usage.ts";
 import { scanAll } from "./util.ts";
-import { type ConversationView, ConversationViews } from "./view.ts";
+import { type ConversationView, ConversationViews, type ConversationWindow } from "./view.ts";
 
 const SCAN_PAGE_SIZE = 256;
 
@@ -178,8 +178,8 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 		return this.#host.tasks.waitForIdle(this.id, context);
 	}
 
-	watch(context: Context): Promise<ConversationWatch> {
-		return this.#host.views.watch(this.id, context);
+	watch(context: Context, window?: ConversationWindow): Promise<ConversationWatch> {
+		return this.#host.views.watch(this.id, context, window);
 	}
 }
 
@@ -384,9 +384,10 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 		id: ConversationId,
 		observer: Observer<ConversationView>,
 		context: Context,
+		window?: ConversationWindow,
 	): Promise<Observation<ConversationView>> {
 		this.assertUsable();
-		return this.#host.views.observe(id, observer, context);
+		return this.#host.views.observe(id, observer, context, window);
 	}
 
 	root(

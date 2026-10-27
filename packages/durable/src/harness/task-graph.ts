@@ -15,7 +15,7 @@ import type {
 import { type BlockedReason, type BlockedSubject, blockedSubject } from "./scheduler.ts";
 import { closedError, scanAll } from "./util.ts";
 
-/** A live task's durable status without its checkpoint and outcome payloads (spec §9.5). */
+/** A live task's durable status without its checkpoint and outcome payloads (spec §9.4). */
 export type TaskGraphState =
 	| { readonly status: "pending" | "running"; readonly phase: string }
 	| {
@@ -47,7 +47,7 @@ export type TaskGraphNode = {
 	readonly conversations: readonly ConversationId[];
 };
 
-/** Every live task of the Session (spec §9.5). */
+/** Every live task of the Session (spec §9.4). */
 export type TaskGraph = {
 	/** Every live task, keyed by its decimal ID. */
 	readonly tasks: Readonly<Record<string, TaskGraphNode>>;
