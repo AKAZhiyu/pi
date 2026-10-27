@@ -91,13 +91,25 @@ export type CompactionFailure = {
  * Why a run ended without an answer:
  * - `model_error`: the model's response failed, after any retries, or the compaction a request needed failed;
  * - `no_model`: no model is configured, or the configured one is not available;
- * - `aborted`: the run was aborted (`Conversation.abort()`, `abortTask()`);
+ * - `aborted`: the run was aborted (`Conversation.abort()`, `abortTask()`); `detail` says when its abort handler was
+ *   cut off `settings.restartLimit` times and did not finish;
  * - `reset`: a queued reset started a new context at the post-tools boundary, before an answer (a tool's handoff
  *   continues the run);
  * - `faulted`: the run's task threw where it cannot recover, or storage rejected its commit;
- * - `orphaned`: the run's task was aborted while no registered definition could take it.
+ * - `orphaned`: the run's task was aborted while no registered definition could take it;
+ * - `interrupted`: the host stopped while the model was answering, more often than `settings.retry` retries;
+ * - `restart_limit`: the run's generation was cut off `settings.restartLimit` times in a row; a request or poll it was
+ *   cut off during counts as a failed attempt first, so this ends one whose charge itself keeps failing.
  */
-export type RunFailureReason = "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned";
+export type RunFailureReason =
+	| "model_error"
+	| "no_model"
+	| "aborted"
+	| "reset"
+	| "faulted"
+	| "orphaned"
+	| "interrupted"
+	| "restart_limit";
 
 /** The newest run that ended without an answer (spec §8.2). */
 export type RunFailure = {
@@ -108,7 +120,8 @@ export type RunFailure = {
 	reason: RunFailureReason;
 	/**
 	 * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
-	 * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
+	 * the task could not run (`missing_task`, `task_too_old`, `migration_failed`); `interrupted` and `restart_limit`: what
+	 * was cut off, and how often.
 	 */
 	detail?: string;
 };
@@ -178,6 +191,38 @@ export const PROGRESS_COMMIT: CommitOptions = { persistence: { kind: "deferred" 
 const RUN_TASK_KINDS: ReadonlySet<string> = new Set(["pi.generation"]);
 const TOOL_TASK_KIND = "pi.tool";
 const COMPACTION_TASK_KIND = "pi.compaction";
+
+/**
+ * Built-in task kinds that end themselves once cut off `settings.restartLimit` times (`TaskRecord.restarts`); the
+ * scheduler faults a task of any other kind instead (spec §5.4).
+ */
+export const LIMITS_RESTARTS: ReadonlySet<string> = new Set([...RUN_TASK_KINDS, TOOL_TASK_KIND, COMPACTION_TASK_KIND]);
+
+/** Whether `task` was cut off `settings.restartLimit` times in a row, so its phase ends it instead of running. */
+export function cutOffTooOften(
+	task: { readonly restarts?: number },
+	runtime: { readonly settings: { readonly restartLimit: number } },
+): boolean {
+	// The settings are read only for a task that was cut off at all, so the normal path resolves nothing more.
+	return task.restarts !== undefined && task.restarts >= runtime.settings.restartLimit;
+}
+
+/**
+ * Whether a task at the limit may still do the cleanup it does when it ends, such as converting a partial: only at the
+ * limit. Past it, that cleanup may be what cut the task off, so the task ends without it.
+ */
+export function salvageable(
+	task: { readonly restarts?: number },
+	runtime: { readonly settings: { readonly restartLimit: number } },
+): boolean {
+	return (task.restarts ?? 0) <= runtime.settings.restartLimit;
+}
+
+/** How often a task was cut off, for a message: "once", or "3 times in a row". */
+export function cutOffCount(task: { readonly restarts?: number }): string {
+	const restarts = task.restarts ?? 0;
+	return restarts === 1 ? "once" : `${restarts} times in a row`;
+}
 
 /** How a run ends: with an answer, or without one, settling its inputs `unanswered` and recording why. */
 export type RunEnd =
@@ -319,21 +364,28 @@ export async function settleSchedulerOutcome(
 		removeNestedSlots(live, record.id);
 		return;
 	}
+	// Only an abort handler is faulted for the limit here (the built-in phases end themselves): the task was aborted,
+	// and keeps that meaning. Its run ends `aborted`, with the limit as detail, and an aborted compaction is no failure.
+	const detail = outcome.status === "faulted" ? outcome.error.detail : undefined;
+	const cutOff =
+		typeof detail === "object" && detail !== null && "reason" in detail && detail.reason === "restart_limit";
 	if (record.kind === COMPACTION_TASK_KIND) {
-		const error = outcome.status === "faulted" ? outcome.error.message : outcome.reason;
-		failCompactionStatus(await tx.doc(LiveDoc, record.conversationId), record.id, error);
+		const live = await tx.doc(LiveDoc, record.conversationId);
+		if (cutOff) removeCompactionStatus(live, record.id);
+		else failCompactionStatus(live, record.id, outcome.status === "faulted" ? outcome.error.message : outcome.reason);
 		return;
 	}
 	if (!RUN_TASK_KINDS.has(record.kind)) return;
 	const live = await tx.doc(LiveDoc, record.conversationId);
 	if (live.run?.taskId !== record.id) return;
-	await convertPartial(tx, live, record.conversationId);
+	// Cut off, the abort handler may have died converting the partial: the run ends without it.
+	if (!cutOff) await convertPartial(tx, live, record.conversationId);
 	endRun(
 		tx,
 		live,
 		record.id,
 		outcome.status === "faulted"
-			? { status: "unanswered", reason: "faulted", detail: outcome.error.message }
+			? { status: "unanswered", reason: cutOff ? "aborted" : "faulted", detail: outcome.error.message }
 			: {
 					status: "unanswered",
 					reason: "orphaned",

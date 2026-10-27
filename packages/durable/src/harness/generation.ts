@@ -30,7 +30,17 @@ import type {
 import { addTools, sectionExtension } from "./agent.ts";
 import { compactionPolicy, createCompaction, estimateContext, selectCut } from "./compaction.ts";
 import { applyBoundary, type Boundary, prepareBoundary, withdrawQueuedInputs } from "./inbox.ts";
-import { endRun, LiveDoc, type LiveState, PROGRESS_COMMIT, type RunEnd, type ToolSlot } from "./live.ts";
+import {
+	cutOffCount,
+	cutOffTooOften,
+	endRun,
+	LiveDoc,
+	type LiveState,
+	PROGRESS_COMMIT,
+	type RunEnd,
+	salvageable,
+	type ToolSlot,
+} from "./live.ts";
 import { PartialChanges, type PartialMessage } from "./partial-changes.ts";
 import { planSystemEntries, renderSections, replaySections } from "./prompt.ts";
 import { ensureProviderSessionId } from "./provider.ts";
@@ -74,7 +84,17 @@ export type GenerationCheckpoint =
 			/** Newest entry included in the request. */
 			cutoff: EntryId;
 	  }
-	| { phase: "retry"; attempt: number; compacted?: TaskId<CompactionResult>; until: number }
+	| {
+			phase: "retry";
+			attempt: number;
+			compacted?: TaskId<CompactionResult>;
+			until: number;
+			/**
+			 * The deferred response a poll was fetching when the host died: the next attempt polls it again instead of
+			 * sending another request, so the provider's job is neither lost nor paid twice. Absent otherwise.
+			 */
+			poll?: { model: ModelRef; thinkingLevel?: ModelThinkingLevel; cutoff: EntryId; handle: DeferredHandle };
+	  }
 	| {
 			phase: "poll";
 			attempt: number;
@@ -133,6 +153,7 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 		 * may land meanwhile.
 		 */
 		prepare: async (task, runtime, context) => {
+			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, context);
 			const { conversationId } = runtime;
 			const agent = await runtime.agent(context);
 			const settings = runtime.settings;
@@ -209,6 +230,10 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 			}, context);
 		},
 		request: async (task, runtime, context) => {
+			// Charging the attempt may itself be what keeps failing, such as converting a huge partial: the limit ends it.
+			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, context);
+			// The host stopped while this request was in flight: a failed attempt, not a resend (spec §8.3).
+			if (task.restarts !== undefined) return interrupted(runtime, task.state.checkpoint, context);
 			const { attempt, compacted, model: ref, thinkingLevel, streamOptions, cutoff } = task.state.checkpoint;
 			const conversationId = runtime.conversationId;
 			await runtime.commit(async (tx) => {
@@ -238,21 +263,32 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 		},
 		/** After the backoff's sleep; a run before `until` (an early wake, or a record of an earlier version) sleeps again. */
 		retry: async (task, runtime, context) => {
-			const { attempt, compacted, until } = task.state.checkpoint;
+			const { attempt, compacted, until, poll } = task.state.checkpoint;
+			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, context);
 			if (until > runtime.now()) return runtime.sleepUntil(until, task.state.checkpoint, context);
 			await runtime.commit(async (tx) => {
-				(await tx.doc(LiveDoc, runtime.conversationId)).generation = { attempt: attempt + 1 };
-				const checkpoint: GenerationCheckpoint = {
-					phase: "prepare",
-					attempt: attempt + 1,
-					...(compacted === undefined ? {} : { compacted }),
-				};
-				return { status: "running", checkpoint };
+				const live = await tx.doc(LiveDoc, runtime.conversationId);
+				const kept = compacted === undefined ? {} : { compacted };
+				// A poll the host died during polls its response again, as the next attempt.
+				if (poll !== undefined) {
+					const pollAt = runtime.now();
+					live.generation = { attempt: attempt + 1, deferred: { pollAt } };
+					return {
+						status: "running",
+						checkpoint: { phase: "poll", attempt: attempt + 1, ...kept, ...poll, pollAt },
+					};
+				}
+				live.generation = { attempt: attempt + 1 };
+				return { status: "running", checkpoint: { phase: "prepare", attempt: attempt + 1, ...kept } };
 			}, context);
 		},
 		/** After the sleep until `pollAt`; a run before it (an early wake, or a record of an earlier version) sleeps again. */
 		poll: async (task, runtime, context) => {
 			const { attempt, compacted, model: ref, thinkingLevel, cutoff, handle, pollAt } = task.state.checkpoint;
+			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, context);
+			// The host stopped while the poll's fetch was in flight: a failed attempt, as for a request. Checked before the
+			// time, which may have moved backwards on a replacement host; a sleeping poll is never cut off.
+			if (task.restarts !== undefined) return interrupted(runtime, task.state.checkpoint, context);
 			if (pollAt > runtime.now()) return runtime.sleepUntil(pollAt, task.state.checkpoint, context);
 			const model = runtime.models.getModel(ref.provider, ref.modelId);
 			if (model === undefined) return failNoModel(runtime, ref, context);
@@ -264,6 +300,7 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 			await classify(runtime, request, message, context);
 		},
 		tools: async (task, runtime, context) => {
+			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, context);
 			const { assistant, tools, pending } = task.state.checkpoint;
 			const [next, ...rest] = pending;
 			if (next === undefined) return finishToolRound(runtime, assistant, tools, context);
@@ -285,19 +322,8 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 	},
 	abort: async (task, runtime, context) => {
 		const checkpoint = task.state.checkpoint;
-		if (checkpoint.phase === "poll") {
-			const model = runtime.models.getModel(checkpoint.model.provider, checkpoint.model.modelId);
-			if (model !== undefined) {
-				try {
-					await runtime.models.cancelDeferred(model, checkpoint.handle, {
-						signal: runtime.signal,
-						telemetry: context.telemetry,
-					});
-				} catch (error) {
-					runtime.report(error, { type: "host", callback: "models" });
-				}
-			}
-		}
+		const polled = deferredOf(checkpoint);
+		if (polled !== undefined) await cancelDeferred(runtime, polled, context);
 		const conversationId = runtime.conversationId;
 		// Runs after the round's tool tasks are terminal; calls never started get `aborted` results (spec §8.5).
 		const unstarted =
@@ -386,6 +412,109 @@ async function failModelError(runtime: Runtime, text: string, context: Context):
 			outcome: { status: "failed", error: { message: text, detail: { reason: "model_error" } } },
 		};
 	}, context);
+}
+
+/**
+ * The host stopped while this attempt's request or poll was in flight (`TaskRecord.restarts`): a failed attempt under
+ * `settings.retry` (spec §8.3). The committed partial becomes an aborted entry; the next attempt follows the backoff, a
+ * poll's by polling its deferred response again, or, with no retry left, the run ends `interrupted`.
+ */
+async function interrupted(
+	runtime: Runtime,
+	checkpoint: Extract<GenerationCheckpoint, { phase: "request" | "poll" }>,
+	context: Context,
+): Promise<void> {
+	const { attempt, compacted } = checkpoint;
+	const policy = runtime.settings.retry;
+	const retry = policy.enabled && attempt <= policy.maxRetries;
+	const until = retry ? runtime.now() + retryDelayMs(policy, attempt) : 0;
+	const polled = checkpoint.phase === "poll" ? checkpoint : undefined;
+	const text =
+		polled === undefined
+			? `The host stopped while the model was answering, on attempt ${attempt}`
+			: `The host stopped while the deferred answer was fetched, on attempt ${attempt}`;
+	// A run that ends does not leave the provider's job running.
+	if (!retry && polled !== undefined) await cancelDeferred(runtime, polled, context);
+	await runtime.commit(async (tx): Promise<Next> => {
+		// Read before the first table write; only a failure uses it.
+		const failure = retry ? undefined : await prepareFailure(tx, runtime);
+		const live = await tx.doc(LiveDoc, runtime.conversationId);
+		await convertPartial(tx, live, runtime.conversationId);
+		if (failure === undefined) {
+			live.generation = { attempt, retry: { at: until, error: text } };
+			const poll =
+				polled === undefined
+					? {}
+					: {
+							poll: {
+								model: polled.model,
+								...(polled.thinkingLevel === undefined ? {} : { thinkingLevel: polled.thinkingLevel }),
+								cutoff: polled.cutoff,
+								handle: polled.handle,
+							},
+						};
+			const next = { phase: "retry", attempt, ...(compacted === undefined ? {} : { compacted }), until, ...poll };
+			return { status: "sleeping", checkpoint: next as GenerationCheckpoint, until };
+		}
+		await endFailedRun(tx, runtime, live, failure, { status: "unanswered", reason: "interrupted", detail: text });
+		return {
+			status: "terminal",
+			outcome: { status: "failed", error: { message: text, detail: { reason: "interrupted" } } },
+		};
+	}, context);
+}
+
+/**
+ * End a run whose generation was cut off `settings.restartLimit` times in a row (spec §5.4). At the limit it still
+ * keeps a committed partial as an aborted entry and cancels a deferred response it polled; past the limit that cleanup
+ * may be what cut it off, so it ends without it.
+ */
+async function endCutOff(
+	runtime: Runtime,
+	task: { readonly restarts?: number; readonly state: { readonly checkpoint: GenerationCheckpoint } },
+	context: Context,
+): Promise<void> {
+	const checkpoint = task.state.checkpoint;
+	const text = `The generation was interrupted ${cutOffCount(task)} in its ${checkpoint.phase} phase`;
+	const salvage = salvageable(task, runtime);
+	const polled = deferredOf(checkpoint);
+	if (salvage && polled !== undefined) await cancelDeferred(runtime, polled, context);
+	await runtime.commit(async (tx): Promise<Next> => {
+		const failure = await prepareFailure(tx, runtime);
+		const live = await tx.doc(LiveDoc, runtime.conversationId);
+		if (salvage) await convertPartial(tx, live, runtime.conversationId);
+		await endFailedRun(tx, runtime, live, failure, { status: "unanswered", reason: "restart_limit", detail: text });
+		return {
+			status: "terminal",
+			outcome: { status: "failed", error: { message: text, detail: { reason: "restart_limit" } } },
+		};
+	}, context);
+}
+
+/** The deferred response a checkpoint polls, or will poll again after a retry's backoff. */
+function deferredOf(
+	checkpoint: GenerationCheckpoint,
+): { readonly model: ModelRef; readonly handle: DeferredHandle } | undefined {
+	if (checkpoint.phase === "poll") return checkpoint;
+	return checkpoint.phase === "retry" ? checkpoint.poll : undefined;
+}
+
+/** Cancel a deferred response no attempt will poll again; a failure is reported, never thrown. */
+async function cancelDeferred(
+	runtime: Runtime,
+	checkpoint: { readonly model: ModelRef; readonly handle: DeferredHandle },
+	context: Context,
+): Promise<void> {
+	const model = runtime.models.getModel(checkpoint.model.provider, checkpoint.model.modelId);
+	if (model === undefined) return;
+	try {
+		await runtime.models.cancelDeferred(model, checkpoint.handle, {
+			signal: runtime.signal,
+			telemetry: context.telemetry,
+		});
+	} catch (error) {
+		runtime.report(error, { type: "host", callback: "models" });
+	}
 }
 
 /** Settle the run's inputs `unanswered` with `no_model` and fail. */

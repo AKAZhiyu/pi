@@ -40,7 +40,7 @@ export type TaskGraphNode = {
 	readonly state: TaskGraphState;
 	/**
 	 * Why it cannot run here, when it cannot: no registered definition takes it (`missing_task`, `task_too_old`,
-	 * `migration_failed`), or the restart limit parked it (`restart_limit`). Follows registry changes.
+	 * `migration_failed`). Follows registry changes.
 	 */
 	readonly blocked?: BlockedReason;
 	/** Conversations this task owns, in ID order. */

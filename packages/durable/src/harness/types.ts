@@ -578,15 +578,18 @@ export type HarnessSettings = {
 	 */
 	readonly documentRetentionMs?: number;
 	/**
-	 * What a run that fails (`model_error`, `no_model`) does with the inputs queued behind it: `keep` leaves them
+	 * What a run that fails (`model_error`, `no_model`, `interrupted`, `restart_limit`) does with the inputs queued behind it: `keep` leaves them
 	 * queued until the next input or queued write, `continue` starts the next run with them, as an answer would, and
 	 * `withdraw` settles them `unanswered` with reason `run_failed`. Default `keep`.
 	 */
 	readonly afterFailedRun?: AfterFailedRun;
 	/**
 	 * How many times in a row a task may be cut off by a crash, eviction, or reset (a close does not count) without
-	 * changing its state before it is parked as blocked (`restart_limit`) instead of run again; `Harness.retryTask()`
-	 * runs it again. Default 5; `Infinity` never parks.
+	 * changing its state before it ends instead of running again: a tool call with an error result, a compaction failed
+	 * into `pi.live.compactionFailure`, a run with `pi.live.runFailure` reason `restart_limit`, any other task `faulted`
+	 * with detail `{ reason: "restart_limit" }`. A generation's request or poll the host died during is a failed attempt
+	 * under `retry` first; the limit bounds it only when charging that attempt keeps being cut off. Default 5;
+	 * `Infinity` never ends a task for it.
 	 */
 	readonly restartLimit?: number;
 };
@@ -672,7 +675,7 @@ export type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
 	/**
 	 * Receives failures that do not fail the calling operation, such as a throwing hook or listener, a task that faulted,
 	 * and the error that fails the Session, once. `info` says what happened: a host can tell a failed Session
-	 * (`session_failed`, often a platform reset) from a faulted task (`task_faulted`) or a parked one (`task_parked`).
+	 * (`session_failed`, often a platform reset) from a faulted task (`task_faulted`).
 	 * Its own throw or rejection is dropped.
 	 */
 	readonly onReport?: (error: unknown, info: ReportInfo) => void;
@@ -711,13 +714,10 @@ export type TaskInspection = {
 		| { readonly kind: "sleeping"; readonly until: number }
 		/** Outcome held until its ordinary owned work drains. */
 		| { readonly kind: "completing" }
-		/**
-		 * Cannot run here: no registered definition can take it (aborting it settles it as `orphaned`), or it is parked by
-		 * the restart limit (`retryTask()` runs it again).
-		 */
+		/** Cannot run here: no registered definition can take it (aborting it settles it as `orphaned`). */
 		| {
 				readonly kind: "blocked";
-				readonly reason: "missing_task" | "task_too_old" | "migration_failed" | "restart_limit";
+				readonly reason: "missing_task" | "task_too_old" | "migration_failed";
 				readonly error?: unknown;
 		  };
 };
@@ -845,11 +845,6 @@ export interface Harness extends Session {
 	 * definition cannot take it settles as `orphaned` instead.
 	 */
 	abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
-	/**
-	 * Run a task parked by `settings.restartLimit` again: clears its restart count and enables scheduling. Does nothing
-	 * for a task that is not parked; rejects for an unknown one.
-	 */
-	retryTask(id: TaskId, context: Context): Promise<void>;
 	/** Resolve with the terminal receipt; cancelling `context` cancels only this wait. */
 	waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
 	/** Resolve when the ordinary ownership scope of every ownerless conversation has no live non-background task. */

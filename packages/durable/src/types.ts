@@ -153,8 +153,10 @@ export type HostCallback = "now" | "settings" | "registry" | "env" | "models" | 
  * failed, when known; for a task's own code, the one that installed the definition the task ran.
  * - `session_failed`: the error failed the Session, which closes: a Storage error, often a platform reset.
  * - `task_faulted`: the task ended `faulted`: its phase threw (`reason: "threw"`), or its abort handler was cut off
- *   `settings.restartLimit` times (`reason: "restart_limit"`).
- * - `task_parked`: the restart limit parked the task until `Harness.retryTask()`.
+ *   `settings.restartLimit` times (`reason: "restart_limit"`), as was a phase of a task of an extension's kind.
+ * - `task_interrupted`: crashes ended the task: it ended itself after being cut off `settings.restartLimit` times in a
+ *   row (`reason: "restart_limit"`; a tool call, a compaction, a generation), or a generation's run ended because the
+ *   host kept stopping while the model answered (`reason: "interrupted"`). `restarts` is the task's count when it ended.
  * - `migration_failed`: the task's stored state could not be migrated; it is blocked until the registry changes.
  * - `task_outdated`: a running task keeps running under its old definition, which was uninstalled (`missing_task`)
  *   or replaced by one that cannot take over its state (`incompatible_task`).
@@ -172,7 +174,13 @@ export type ReportInfo =
 			readonly extension?: string;
 			readonly reason: "threw" | "restart_limit";
 	  }
-	| { readonly type: "task_parked"; readonly task: ReportTask; readonly extension?: string }
+	| {
+			readonly type: "task_interrupted";
+			readonly task: ReportTask;
+			readonly extension?: string;
+			readonly reason: "restart_limit" | "interrupted";
+			readonly restarts: number;
+	  }
 	| { readonly type: "migration_failed"; readonly task: ReportTask; readonly extension?: string }
 	| {
 			readonly type: "task_outdated";
@@ -686,8 +694,9 @@ type TaskRecordBase<I, R> = {
 	readonly endedAt?: number;
 	/**
 	 * How many times in a row a crash, eviction, or reset cut the task off while it ran, without the task changing its
-	 * state since; open counts them, and a close does not. At `HarnessSettings.restartLimit` the task is parked as blocked
-	 * until `Harness.retryTask()`.
+	 * state since; open counts them, and a close does not. At `HarnessSettings.restartLimit` the task ends (the built-in
+	 * tasks end themselves, visibly; the scheduler faults any other kind), and a generation reads it to charge an
+	 * interrupted model request as a failed attempt.
 	 */
 	readonly restarts?: number;
 };

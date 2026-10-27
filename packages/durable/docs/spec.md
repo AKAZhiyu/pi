@@ -477,7 +477,7 @@ type HarnessSettings = {
   readonly documentRetentionMs?: number;
   /** What a failed run does with the inputs queued behind it (section 6). */
   readonly afterFailedRun?: "keep" | "continue" | "withdraw";
-  /** Restarts in a row without progress after which a task is parked (section 5.4); `Infinity` never parks. */
+  /** Restarts in a row without progress after which a task ends instead of running again (section 5.4). */
   readonly restartLimit?: number;
 };
 
@@ -605,7 +605,7 @@ type TaskInspection = {
     | { readonly kind: "completing" }
     | {
         readonly kind: "blocked";
-        readonly reason: "missing_task" | "task_too_old" | "migration_failed" | "restart_limit";
+        readonly reason: "missing_task" | "task_too_old" | "migration_failed";
         readonly error?: unknown;
       };
 };
@@ -624,7 +624,13 @@ type ReportInfo =
       readonly extension?: string;
       readonly reason: "threw" | "restart_limit";
     }
-  | { readonly type: "task_parked"; readonly task: ReportTask; readonly extension?: string }
+  | {
+      readonly type: "task_interrupted";
+      readonly task: ReportTask;
+      readonly extension?: string;
+      readonly reason: "restart_limit" | "interrupted";
+      readonly restarts: number;
+    }
   | { readonly type: "migration_failed"; readonly task: ReportTask; readonly extension?: string }
   | {
       readonly type: "task_outdated";
@@ -712,8 +718,6 @@ interface Harness extends Session {
     conversationId?: ConversationId,
   ): Promise<"aborted" | "already_placed" | "settled" | "not_found">;
   abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal">;
-  /** Run a task parked by the restart limit again (section 5.4). */
-  retryTask(id: TaskId, context: Context): Promise<void>;
   waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>>;
   waitForIdle(context: Context): Promise<void>;
   /** Session total of every conversation's `pi.usage` (section 8.6). */
@@ -2360,7 +2364,7 @@ Every run invocation start resolves the task's definition by `TaskRecord.kind`
 from the scheduler's current registry snapshot:
 
 ```text
-restarts at restartLimit           -> stay pending, blocked: restart_limit
+restarts at restartLimit           -> a kind of an extension: terminal faulted (built-in tasks end themselves)
 definition missing                 -> stay pending, blocked: missing_task
 stored version newer than it       -> stay pending, blocked: task_too_old
 stored version older than it       -> migrate(input, checkpoint, storedVersion)
@@ -2376,20 +2380,43 @@ after joining the invocations it stopped, close writes those tasks back as
 reset leaves `running` records. A state the task commits
 itself that differs from its current one (a new checkpoint, a wait, a sleep, an
 outcome) is progress and removes the count; the same checkpoint committed again,
-memos, and document writes are not. Once `restarts` reaches
-`settings.restartLimit` (default 5; `Infinity` never parks), the task is parked:
-blocked with reason `restart_limit`, reported once as `task_parked` at the open
-that parks it, shown in `inspect()` and the task graph, and not active in
-`wake()`. Work that deterministically exhausts memory or CPU before its next
-checkpoint thus stops after a few attempts instead of running forever. Every
-task running when a process dies is counted, not only the one that killed it,
-so a long stream next to the culprit can be parked too; a host shows parked
-tasks and offers `Harness.retryTask(id)`, which removes the count and runs the
-task again, and does nothing for a task that is not parked. A run task that is
-parked keeps its conversation busy. An abort mark starts the count over and
-still runs a parked task's abort handler; an abort handler cut off
-`restartLimit` times is not run again, and the task ends `faulted` with detail
-`{ reason: "restart_limit" }`, reported as `task_faulted` with reason `restart_limit`.
+memos, and document writes are not. Work that deterministically exhausts memory
+or CPU before its next checkpoint thus shows as a growing count, and once
+`restarts` reaches `settings.restartLimit` (default 5; `Infinity` never ends a
+task for it), the task ends visibly instead of running again:
+
+| task | at the limit |
+|---|---|
+| tool call (`pi.tool`) | ends with an error result, diagnostic code `restart_limit` ("Tool X was interrupted 3 times in a row; it is not run again"), built from its slot like an interrupted call's; its task fails with detail `{ reason: "restart_limit" }` |
+| compaction | fails with that error and detail, recorded in `pi.live.compactionFailure` |
+| generation | ends its run `unanswered` with `pi.live.runFailure` reason `restart_limit`, failing with that detail |
+| a kind of an extension | the scheduler ends it `faulted` with detail `{ reason: "restart_limit" }`, reported as `task_faulted` with reason `restart_limit` |
+
+A built-in task that ends itself this way, and a generation whose run ends
+`interrupted` (section 8.3), is reported as `task_interrupted` with that reason,
+the task, and its `restarts`, so a host keeps a crash-loop signal. The built-in
+tasks check the count when a phase starts, a tool call after reading its call;
+reading the setting only when the task has a count, so the normal path does no
+more work. The scheduler checks an extension's task when it reserves it,
+reading the current setting, so a raised limit lets the task run; a task that
+already ended stays ended. A generation's request or deferred poll in flight
+when the host died is a failed attempt under the retry policy (section 8.3)
+first; the limit still bounds it, so a charge that itself keeps cutting the
+task off (converting a huge partial, say) ends the run. At the limit a task
+still does its usual cleanup, such as converting a partial or cancelling a
+deferred response; past it, after that cleanup was cut off too, it ends
+without. Every task running when a process dies is counted, not only the one
+that killed it, so a long stream next to the culprit can end too. A nested
+call runs only while its replay-safe caller runs, so a crash counts both and
+the caller reaches the limit no later than its nested calls; the caller's own
+`restart_limit` result is what the model sees. An abort mark starts the count
+over and still runs the abort handler; an abort handler cut off `restartLimit`
+times is not run again, and the task ends `faulted` with detail
+`{ reason: "restart_limit" }`, reported as `task_faulted` with reason
+`restart_limit`. Someone aborted that task, so its conversation shows the
+abort: a run ends with `runFailure` reason `aborted`, the cut-off as `detail`,
+without converting its partial, and a compaction's status is removed without a
+failure.
 
 An abort invocation resolves the definition the same way. When the definition
 can take the task, its abort handler runs; otherwise the task is orphaned as
@@ -2403,9 +2430,8 @@ incompatible, neither at open nor later. A blocked task without an abort mark
 keeps its durable record unchanged, remains live, still blocks ordinary idle
 waits, and is reconsidered whenever the registry changes. The blocked reason is derived
 runtime state, not a persisted task status. A blocked task is not active in
-`wake()` (section 5.6): only a registry change, or `retryTask()` for a parked
-one, can let it run, and either makes `onWake` report it active, so a host need
-not poll it. The task graph shows the reason and follows registry changes
+`wake()` (section 5.6): only a registry change can let it run, and it makes
+`onWake` report it active, so a host need not poll it. The task graph shows the reason and follows registry changes
 (section 9.4). Document migration remains
 access-driven.
 
@@ -2740,8 +2766,8 @@ for the other submission type rejects. A busy input with `whenBusy: "reject"`
 writes no record and reports `ConversationBusy`. An idle input queues with mode
 `steer` when `whenBusy` is `steer` and `followUp` otherwise.
 
-`settings.afterFailedRun` decides what a run that fails with `model_error` or
-`no_model` does with the inputs queued behind it, in the commit that settles its
+`settings.afterFailedRun` decides what a run that fails with `model_error`,
+`no_model`, `interrupted`, or `restart_limit` does with the inputs queued behind it, in the commit that settles its
 own inputs: `keep` (the default) leaves them queued; `continue` applies the
 final boundary, so the next run starts with them, as after an answer;
 `withdraw` settles them `unanswered` with reason `run_failed`, keeping queued
@@ -3431,7 +3457,8 @@ error diagnostic already says what went wrong, so programs get it, for example
 diagnostic too. So a hook that redacts a schema-less tool's output redacts
 what programs get. An
 error result the Harness writes itself (unavailable, invalid arguments,
-blocked, interrupted, aborted, abandoned, or a scheduler fault) has no
+blocked, interrupted, aborted, abandoned, ended at the restart limit, or a
+scheduler fault) has no
 `structuredOutput`; its diagnostics say what went wrong. A thrown error
 becomes a `tool_error` diagnostic with its message. A nested call whose result breaks this gets an error result
 with an `invalid_structured_output` diagnostic, without the broken value: a
@@ -3799,7 +3826,8 @@ retain their tool-result entry ID for the generation's `tools` phase.
 
 Error results the Harness writes itself set `isError` and carry an `error`
 diagnostic with one of the codes `tool_unavailable`, `invalid_arguments`,
-`blocked`, `interrupted`, `aborted`, or `tool_error` (a throw from `execute()`)
+`blocked`, `interrupted`, `abandoned`, `restart_limit` (section 5.4),
+`aborted`, or `tool_error` (a throw from `execute()`)
 and the error text as its message. Their content is the durable partial output,
 if any, and `details` is the tool's last reported value, if any.
 
@@ -4267,7 +4295,7 @@ type RunFailure = {
   taskId: TaskId;
   /** The run's inputs, settled `unanswered`. */
   inputs: SubmissionId[];
-  reason: "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned";
+  reason: "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned" | "interrupted" | "restart_limit";
   /**
    * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
    * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
@@ -4351,10 +4379,12 @@ that settles its inputs `unanswered`:
 |---|---|---|
 | `model_error` | the response failed after any retries, or a blocking or overflow compaction it needed failed; `detail` is the error text | `model_error` with the text |
 | `no_model` | no model is configured, or the configured one is not available; `detail` names it | `no_model` |
-| `aborted` | its task was aborted (`Conversation.abort()`, `abortTask()`) | `aborted` |
+| `aborted` | its task was aborted (`Conversation.abort()`, `abortTask()`); `detail` says when its abort handler was cut off `restartLimit` times (section 5.4) | `aborted`, with that detail |
 | `reset` | a queued reset started a new context at the post-tools boundary (a tool's handoff continues the run) | `reset` |
 | `faulted` | the scheduler faulted its task (section 5.4); `detail` is the error message | `faulted` with the message |
 | `orphaned` | its task was aborted while no definition could take it; `detail` is the reason | the reason |
+| `interrupted` | the host stopped while the model was answering, with no retry left (section 8.3); `detail` names the attempt | `interrupted` with the text |
+| `restart_limit` | its generation was cut off `restartLimit` times in a row (section 5.4), also while an interrupted request was charged; `detail` says in which phase | `restart_limit` with the text |
 
 The next commit that starts a run removes it. A run started in the same commit,
 the queue's next run under `afterFailedRun: "continue"` (section 6) or after a
@@ -4469,7 +4499,22 @@ The run's inputs live in `pi.live.run`, not in the task input.
   `prepare`. `request` converts a leftover partial (below) before it resolves
   the model.
 - `request` first converts a committed partial left in `pi.live` by an
-  interrupted attempt into an aborted `pi.assistant` entry. It then streams the
+  interrupted attempt into an aborted `pi.assistant` entry. When the host died
+  while this request was in flight (the record's `restarts`, section 5.4), the
+  attempt failed: that commit also either sleeps at `retry` until
+  `now + retryDelayMs(policy, attempt)`, with `pi.live.generation.retry` saying
+  "The host stopped while the model was answering, on attempt N", when the
+  retry policy allows another attempt, or settles the inputs `unanswered` and
+  ends the run with `runFailure` reason `interrupted` and that text, failing the
+  task. A request a close stopped is not counted and is sent again, below. A
+  `poll` whose fetch was in flight is charged the same way ("The host stopped
+  while the deferred answer was fetched"), checked before its `pollAt`, which a
+  replacement host's clock may not have reached: its `retry` keeps the deferred
+  response and polls it again as the next attempt instead of sending another
+  request, and a run that ends instead cancels it, as the abort handler does.
+  A generation asleep in `retry` or `poll`, or waiting for its tools, is not
+  running and never charged. Past `restartLimit` the run ends `restart_limit`
+  instead (section 5.4). Otherwise it streams the
   model context through `cutoff` with the invocation signal, the thinking level
   as `reasoning` (omitted for `off`), the conversation's persisted provider
   `sessionId`, and the pinned `streamOptions`, committing throttled partials at
@@ -4477,9 +4522,10 @@ The run's inputs live in `pi.live.run`, not in the task input.
   (section 4.1), so Storage gets them at the next commit that reads `pi.live`
   or within `settings.progress.persistWithinMs`.
   Before streaming, the `beforeRequest` chain may
-  replace the messages for this request only. Recovery resends the same
-  committed messages with the same pinned model, thinking level, and stream
-  options, and reruns `beforeRequest`.
+  replace the messages for this request only. After a close, recovery resends
+  the same committed messages with the same pinned model, thinking level, and
+  stream options, and reruns `beforeRequest`; after a crash the attempt is
+  charged instead, as above.
 - `afterResponse` observes every terminal message, from `request` or `poll`,
   before classification; a still deferred result is not terminal.
 - Before classifying, the handler stops the partial throttle and awaits any
@@ -4790,7 +4836,7 @@ Phases:
   `sessionId`, and the pinned stream options without `deferred`, with
   `cacheRetention: "none"` and the pinned `maxTokens`. Providers such as Codex
   may suppress that identity when caching is disabled. Recovery resends the same
-  request. The response is classified in one commit
+  request, until the task was cut off `restartLimit` times in a row (section 5.4). The response is classified in one commit
   that adds its usage to `pi.usage` (section 8.6):
   - `stop` with non-empty text and no tool call: the text is the summary, placed
     as below.
@@ -5288,7 +5334,7 @@ type TaskGraphNode = {
   /** Conversations this task owns, in ID order. */
   readonly conversations: readonly ConversationId[];
   /** Why it cannot run here, when it cannot (section 5.4); follows registry changes. */
-  readonly blocked?: "missing_task" | "task_too_old" | "migration_failed" | "restart_limit";
+  readonly blocked?: "missing_task" | "task_too_old" | "migration_failed";
 };
 
 type TaskGraph = {
@@ -5643,9 +5689,12 @@ views keep it.
 - `session_failed`: the error that failed the Session (a Storage error, often a
   platform reset, or the Session's own bookkeeping);
 - `task_faulted`: a task ended `faulted`, because its phase threw (reason
-  `threw`) or its abort handler was cut off `restartLimit` times (reason
-  `restart_limit`);
-- `task_parked`: the restart limit parked a task (section 5.4);
+  `threw`), or it or its abort handler was cut off `restartLimit` times (reason
+  `restart_limit`, section 5.4);
+- `task_interrupted`: crashes ended a task: a built-in task ended itself at the
+  restart limit (reason `restart_limit`), or a generation's run ended because
+  the host kept stopping while the model answered (reason `interrupted`), with
+  the task's `restarts` (section 5.4);
 - `migration_failed`: a task's migration threw, and the task is blocked;
 - `task_outdated`: a running task keeps its old definition, which is missing
   (`missing_task`) or cannot take the task (`incompatible_task`);

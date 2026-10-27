@@ -43,7 +43,7 @@ import { AgentDoc, configure, createAgent, resolveAgent, resolveSettings } from 
 import { createCompaction } from "./compaction.ts";
 import { readContext } from "./context.ts";
 import { InboxDoc, withdrawQueuedInputs } from "./inbox.ts";
-import { LiveDoc, settleSchedulerOutcome } from "./live.ts";
+import { LIMITS_RESTARTS, LiveDoc, settleSchedulerOutcome } from "./live.ts";
 import { ProviderDoc } from "./provider.ts";
 import { BUILTIN_TASKS } from "./registry.ts";
 import { type InvocationBinding, TaskScheduler } from "./scheduler.ts";
@@ -245,6 +245,7 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 			timers: hostTimers(options.setTimer, (error) => report(error, { type: "host_error", callback: "setTimer" })),
 			writeAtClose: (writes) => this.writeAtClose(writes),
 			report: this.#report,
+			limitsRestarts: (kind) => LIMITS_RESTARTS.has(kind),
 			settleOutcome: settleSchedulerOutcome,
 			withdrawInputs: withdrawQueuedInputs,
 			conversation: async (id, binding, callContext) => {
@@ -341,11 +342,6 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 
 	abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal"> {
 		return this.#tasks.abort(id, context);
-	}
-
-	retryTask(id: TaskId, context: Context): Promise<void> {
-		this.assertUsable();
-		return this.#tasks.retry(id, context);
 	}
 
 	async waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>> {
@@ -471,12 +467,12 @@ function safeReport(
 		};
 		switch (info.type) {
 			case "task_faulted":
+			case "task_interrupted":
 			case "task_outdated":
 				attributes.reason = info.reason;
 				attributes.extension = info.extension;
 				attributes["task.id"] = info.task.id;
 				break;
-			case "task_parked":
 			case "migration_failed":
 			case "task_error":
 			case "extension_error":
