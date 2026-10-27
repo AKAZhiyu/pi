@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- The Node SQLite driver keeps the 256 most recently used prepared statements per connection instead of every statement it ever prepared, so callers generating SQL of unbounded shapes (a query builder) no longer grow memory without bound.
 - Fixed append ops from the delta tracker and `diffRevisions()` keeping the whole string they were cut from alive (V8 represents a slice as a view of its source), so a delta chain, a watch backlog or a replica built from appends to a growing text held one copy of the text per commit ([#9265](https://github.com/earendil-works/pi/issues/9265))
 
 ## [1.4.0] - 2026-10-21
