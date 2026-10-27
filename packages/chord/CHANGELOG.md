@@ -24,6 +24,7 @@
 
 ### Changed
 
+- The delta tracker keeps its one open change in a plain field and needs a `WeakRef` only for a second change open at the same time (one per change before). A `WeakRef` target survives the scavenges of its job, so a run of changes in one job promoted every change's overlay to old space: 200,000 small changes in one job now promote 2 MB instead of 47.5 MB and take 3.1 µs each instead of 3.8 µs (3.0 instead of 3.5 µs when they span jobs). A draft dropped without `prepare()` or `abort()` now stays referenced by its tracker until the tracker's next `beginChange()` or `adopt()`.
 - `applyImmutable()`, `applyImmutableBatches()` and tracker revisions copy each container on a changed path with spread (or `Object.assign()` onto a null-prototype object) instead of one `Object.defineProperty()` per key, about 25 times faster per container ([#9265](https://github.com/earendil-works/pi/issues/9265))
 
 ### Fixed
