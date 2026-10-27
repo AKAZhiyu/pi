@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `SqliteExecutor` (re-exported from Chord) gains `runCounted(sql, ...params)`, resolving with the rows the statement changed; custom `SqliteDatabase` implementations add it.
 - `Storage.commit(writes, adopt, context)` takes an `adopt(seq)` callback, the Session's in-memory adoption and publication of the batch: a storage calls it exactly once, synchronously, once the batch is durable and before its next commit starts, then resolves with `seq`, and never for a commit that fails before the batch is durable. Memory, SQLite, JSONL, and IndexedDB storages do; custom storages and wrappers must call or forward it, and the storage conformance suite checks it. A commit that rejects after its adoption is published and fails the Session without rolling the adopted changes back.
 - `Storage.mintId()`'s contract is narrowed to IDs greater than every ID minted since the storage was opened and every ID stored, also across reopen. The bundled storages already behave so.
 - Watches use Chord's `WatchHandle` and `WatchEnd` (Durable re-exports both, with `WatchChange` and `NativeWatchChange`). End reasons are `stopped`, `cancelled`, `ended` (was `session_closed`), `listener_error`, and `failed` (was `session_failed`); `retired` is gone (see below). An ended watch drops its listener and every reference into its Session, so a stopped watch that is still referenced keeps only its last value.
