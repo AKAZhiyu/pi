@@ -1,4 +1,4 @@
-export type { NativeWatchChange, WatchChange, WatchEnd, WatchHandle } from "@earendil-works/chord";
+export type { NativeWatchCall, WatchCall, WatchEnd, WatchHandle } from "@earendil-works/chord";
 export { defineDoc, defineDocFamily } from "./documents.ts";
 export {
 	AssistantEntry,
@@ -131,6 +131,8 @@ export { defineTask } from "./tasks.ts";
 export type {
 	CheckpointInfo,
 	CommitChange,
+	CommitObservation,
+	CommitObserver,
 	CommitOptions,
 	CommitPersistence,
 	CommitPublication,
@@ -176,6 +178,7 @@ export type {
 	Observer,
 	Page,
 	PhaseHandler,
+	Report,
 	ReportFrom,
 	ReportInfo,
 	ReportTask,

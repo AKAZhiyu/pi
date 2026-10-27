@@ -276,15 +276,18 @@ describe("submissions", () => {
 		await harness.close(context);
 	});
 
-	it("resumes a wait only once subscribeCommits() listeners saw the commit that settled it", async () => {
+	it("resumes a wait only once observeCommits() observers saw the commit that settled it", async () => {
 		const setup = chatSetup();
 		setup.faux.setResponses([fauxAssistantMessage("hi")]);
 		const { harness, root } = await openChat(new LateResolvingStorage(), setup);
 		const settled = new Set<SubmissionId>();
-		harness.subscribeCommits((publication) => {
-			for (const change of publication.changes) {
-				if (change.type === "submission" && change.value.status === "done") settled.add(change.value.id);
-			}
+		harness.observeCommits({
+			advance: (publication) => {
+				for (const change of publication.changes) {
+					if (change.type === "submission" && change.value.status === "done") settled.add(change.value.id);
+				}
+			},
+			end: () => {},
 		});
 		const submission = await root.submit({ type: "input", content: "hello" }, context);
 		await submission.wait(context);

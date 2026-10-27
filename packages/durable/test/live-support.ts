@@ -13,7 +13,7 @@ import {
 	type TaskId,
 	type ToolSlot,
 } from "@earendil-works/pi-durable";
-import { context, documentChanges, observeCommits } from "./session-support.ts";
+import { context, documentChanges, followCommits } from "./session-support.ts";
 
 /**
  * Every view of `conversationId` from now on, one per commit that changes it, unfolded: a synchronous observer, so no
@@ -23,7 +23,7 @@ export async function viewHistory(harness: Harness, conversationId: Conversation
 	const views: ConversationView[] = [];
 	const observation = await harness.observeConversation(
 		conversationId,
-		{ advance: ({ value }) => views.push(value), end: () => {} },
+		{ advance: (call) => call.kind === "value" && views.push(call.value), end: () => {} },
 		context,
 	);
 	views.push(observation.value);
@@ -69,9 +69,9 @@ export function startOrder(history: readonly LiveState[]): string[] {
  */
 export function nestedResults(harness: Harness): Map<TaskId, NestedToolExecutionResult> {
 	const results = new Map<TaskId, NestedToolExecutionResult>();
-	observeCommits(harness, (publication) => {
+	followCommits(harness, (publication) => {
 		for (const change of documentChanges(publication)) {
-			if (change.record.kind !== NestedCallDoc.definition.kind || change.value === null) continue;
+			if (change.record.kind !== NestedCallDoc.definition.kind || change.kind === "retire") continue;
 			const state = change.value as NestedCallState;
 			if (state.taskId !== undefined && state.result !== undefined) {
 				results.set(state.taskId, state.result as unknown as NestedToolExecutionResult);
@@ -95,7 +95,7 @@ export function nestedResultOf(
 export async function graphHistory(harness: Harness) {
 	const graphs: TaskGraph[] = [];
 	const observation = await harness.observeTaskGraph(
-		{ advance: ({ value }) => graphs.push(value), end: () => {} },
+		{ advance: (call) => call.kind === "value" && graphs.push(call.value), end: () => {} },
 		context,
 	);
 	graphs.push(observation.value);

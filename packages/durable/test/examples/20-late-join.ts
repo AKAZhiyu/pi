@@ -63,7 +63,9 @@ console.log(
 );
 console.log("view tool slot:", live.tools?.[0]?.status, JSON.stringify(live.tools?.[0]?.output));
 let shown = "";
-view.start(async ({ value }) => {
+view.start(async (call) => {
+	if (call.kind !== "value") return;
+	const { value } = call;
 	const state = value.docs["pi.live"] as LiveState;
 	const slot = state.tools?.[0];
 	if (slot?.status === "running") console.log("view output now:", JSON.stringify(slot.output));

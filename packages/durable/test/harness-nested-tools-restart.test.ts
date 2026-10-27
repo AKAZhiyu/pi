@@ -487,15 +487,23 @@ describe("nested tool calls across a restart", () => {
 
 		opened = await open(path, setup);
 		let slotsAfterCaller: number | undefined;
-		opened.harness.subscribeCommits((publication) => {
-			for (const change of publication.changes) {
-				if (change.type !== "task" || change.value.kind !== ToolTask.definition.name) continue;
-				if ((change.value.input as ToolTaskInput).kind !== "model" || change.value.state.status !== "terminal")
-					continue;
-				const live = publication.changes.find((each) => each.type === "document" && each.record.kind === "pi.live");
-				const value = live?.type === "document" ? (live.value as { nestedTools?: unknown[] } | null) : undefined;
-				slotsAfterCaller = value?.nestedTools?.length ?? 0;
-			}
+		opened.harness.observeCommits({
+			advance: (publication) => {
+				for (const change of publication.changes) {
+					if (change.type !== "task" || change.value.kind !== ToolTask.definition.name) continue;
+					if ((change.value.input as ToolTaskInput).kind !== "model" || change.value.state.status !== "terminal")
+						continue;
+					const live = publication.changes.find(
+						(each) => each.type === "document" && each.record.kind === "pi.live",
+					);
+					const value =
+						live?.type === "document" && live.kind === "change"
+							? (live.value as { nestedTools?: unknown[] })
+							: undefined;
+					slotsAfterCaller = value?.nestedTools?.length ?? 0;
+				}
+			},
+			end: () => {},
 		});
 		opened.harness.resume();
 		expect((await (await opened.harness.submission(id, context))!.wait(context)).status).toBe("done");

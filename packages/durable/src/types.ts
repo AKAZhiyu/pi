@@ -1,4 +1,4 @@
-import type { Context, Draft, JsonValue, WatchChange, WatchHandle } from "@earendil-works/chord";
+import type { Context, Draft, JsonValue, WatchCall, WatchEnd, WatchHandle } from "@earendil-works/chord";
 import type { Op } from "@earendil-works/chord/delta";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import type { TelemetryCarrier } from "@earendil-works/pi-telemetry";
@@ -149,9 +149,10 @@ export type ReportTask = {
 export type HostCallback = "now" | "settings" | "registry" | "env" | "models" | "setTimer" | "onWake" | "telemetry";
 
 /**
- * What a report to `HarnessOptions.onReport` is about. `extension`, where present, names the extension whose code
- * failed, when known; for a task's own code, the one that installed the definition the task ran.
- * - `session_failed`: the error failed the Session, which closes: a Storage error, often a platform reset.
+ * What a report to `HarnessOptions.onReport` is about, by `kind` (`Report` adds the error). `extension`, where present,
+ * names the extension whose code failed, when known; for a task's own code, the one that installed the definition the
+ * task ran.
+ * - `storage_failed`: the error failed the Session, which closes: a Storage error, often a platform reset.
  * - `task_faulted`: the task ended `faulted`: its phase threw (`reason: "threw"`), or its abort handler was cut off
  *   `settings.restartLimit` times (`reason: "restart_limit"`), as was a phase of a task of an extension's kind.
  * - `task_interrupted`: crashes ended the task: it ended itself after being cut off `settings.restartLimit` times in a
@@ -159,7 +160,8 @@ export type HostCallback = "now" | "settings" | "registry" | "env" | "models" | 
  *   host kept stopping while the model answered (`reason: "interrupted"`). `restarts` is the task's count when it ended.
  * - `migration_failed`: the task's stored state could not be migrated; it is blocked until the registry changes.
  * - `task_outdated`: a running task keeps running under its old definition, which was uninstalled (`missing_task`)
- *   or replaced by one that cannot take over its state (`incompatible_task`).
+ *   or replaced by one that cannot take over its state: older than the task (`task_too_old`), or newer without a
+ *   `migrate` (`migration_failed`).
  * - `task_error`: the task's own `runtime.report()`, or a failure in running it.
  * - `extension_error`: a hook, a section, a wrapper, or a tool's invalid structured output; with the task that ran it,
  *   or, outside a task, the conversation whose agent was resolved.
@@ -167,41 +169,44 @@ export type HostCallback = "now" | "settings" | "registry" | "env" | "models" | 
  * - `listener_error`: a commit, close, watch, view, or document listener threw.
  */
 export type ReportInfo =
-	| { readonly type: "session_failed" }
+	| { readonly kind: "storage_failed" }
 	| {
-			readonly type: "task_faulted";
+			readonly kind: "task_faulted";
 			readonly task: ReportTask;
 			readonly extension?: string;
 			readonly reason: "threw" | "restart_limit";
 	  }
 	| {
-			readonly type: "task_interrupted";
+			readonly kind: "task_interrupted";
 			readonly task: ReportTask;
 			readonly extension?: string;
 			readonly reason: "restart_limit" | "interrupted";
 			readonly restarts: number;
 	  }
-	| { readonly type: "migration_failed"; readonly task: ReportTask; readonly extension?: string }
+	| { readonly kind: "migration_failed"; readonly task: ReportTask; readonly extension?: string }
 	| {
-			readonly type: "task_outdated";
+			readonly kind: "task_outdated";
 			readonly task: ReportTask;
 			readonly extension?: string;
-			readonly reason: "missing_task" | "incompatible_task";
+			readonly reason: "missing_task" | "task_too_old" | "migration_failed";
 	  }
-	| { readonly type: "task_error"; readonly task: ReportTask; readonly extension?: string }
+	| { readonly kind: "task_error"; readonly task: ReportTask; readonly extension?: string }
 	| {
-			readonly type: "extension_error";
+			readonly kind: "extension_error";
 			readonly extension?: string;
 			readonly task?: ReportTask;
 			readonly conversationId?: ConversationId;
 	  }
-	| { readonly type: "host_error"; readonly callback: HostCallback; readonly task?: ReportTask }
-	| { readonly type: "listener_error" };
+	| { readonly kind: "host_error"; readonly callback: HostCallback; readonly task?: ReportTask }
+	| { readonly kind: "listener_error" };
+
+/** One report to `HarnessOptions.onReport`: what it is about (`ReportInfo`, by `kind`) and the `error` reported. */
+export type Report = ReportInfo & { readonly error: unknown };
 
 /** Whose code a task's `runtime.report()` is about when not the task's own: an extension's, or a host callback. */
 export type ReportFrom =
-	| { readonly type: "extension"; readonly extension?: string }
-	| { readonly type: "host"; readonly callback: HostCallback };
+	| { readonly kind: "extension"; readonly extension?: string }
+	| { readonly kind: "host"; readonly callback: HostCallback };
 
 /**
  * A host timer, given as `HarnessOptions.setTimer`: call `callback` once, about `delayMs` from now, and return
@@ -882,19 +887,30 @@ export type StorageWrite =
 	  }
 	| { readonly type: "document.retire"; readonly id: DocumentId };
 
-/** Committed change of one document incarnation. */
+/**
+ * Committed change of one document incarnation: `type: "document"` with `kind: "change"` (a creation or an update) or
+ * `kind: "retire"` (this commit retired the incarnation), or a `document.copy`.
+ */
 export type DocumentCommitChange =
 	| {
 			readonly type: "document";
+			readonly kind: "change";
 			readonly record: DocumentRecord;
 			/** Conversation owning the document; task documents derive it from their task record. Undefined only for Session documents. */
 			readonly conversationId: ConversationId | undefined;
-			/** Definition version of `value`; absent when this commit retired the incarnation. */
-			readonly version: number | undefined;
-			/** Exact adopted immutable revision, or `null` when this commit retired the incarnation. */
-			readonly value: JsonObject | null;
-			/** Exact adopted operations for an ordinary update; empty for creation and retirement. */
+			/** Definition version of `value`. */
+			readonly version: number;
+			/** Exact adopted immutable revision. */
+			readonly value: JsonObject;
+			/** Exact adopted operations for an ordinary update; empty for creation. */
 			readonly ops: readonly Op[];
+	  }
+	| {
+			readonly type: "document";
+			readonly kind: "retire";
+			readonly record: DocumentRecord;
+			/** Conversation owning the document; task documents derive it from their task record. Undefined only for Session documents. */
+			readonly conversationId: ConversationId | undefined;
 	  }
 	| {
 			/** Definition-free child initialization; consumers hydrate through watch acquisition. */
@@ -1036,20 +1052,34 @@ export type DocumentWatch<T extends JsonObject> = WatchHandle<Readonly<T>>;
 
 /**
  * A synchronous observer of committed Durable state, for adapters such as a Chord source (`observeDoc()`,
- * `Harness.observeConversation()`, `Harness.observeTaskGraph()`). `advance` gets every change, unfolded, as memory
- * adopts it: for a stored commit inside Storage's `adopt`, for a deferred one before it is stored. A view or the graph
- * gets at most one call per commit, a document observer one per change at its address (two for a commit that retires
- * and recreates it); the task graph also advances outside any commit and `adopt`, on the Session line, when a registry
- * change or a failed migration changes a `blocked` reason. Calls may come before the attaching promise resolves; their
- * ops apply from `Observation.value`. `advance` must only record the change, synchronously and quickly, never await,
- * call the Session, or throw. A throw is reported as `listener_error`, detaches the observer, and ends it with the
- * error. `end` is called once, when the Session closes or fails (`failure`), or when the observed scope's owner ends (a
- * task document's task, after its retirement change, inside that commit's `adopt`), and never after `detach()`.
+ * `Harness.observeConversation()`, `Harness.observeTaskGraph()`), with the shapes of Chord's watch: `advance` gets a
+ * `WatchCall`, `end` a `WatchEnd`. `advance` gets every change, unfolded, as memory adopts it: for a stored commit inside
+ * Storage's `adopt`, for a deferred one before it is stored. A view or the graph gets at most one call per commit, a
+ * document observer one per change at its address (two for a commit that retires and recreates it); the task graph also
+ * advances outside any commit and `adopt`, on the Session line, when a registry change or a failed migration changes a
+ * `blocked` reason. Durable's failures are final, so every call is a `value` call; a failure ends the observer. Calls
+ * may come before the attaching promise resolves; their ops apply from `Observation.value`. `advance` must only record
+ * the call, synchronously and quickly, never await, call the Session, or throw. A throw is reported as
+ * `listener_error`, detaches the observer, and ends it `listener_error` with the error. `end` is called once: `ended`
+ * when the Session closes or the observed scope's owner ends (a task document's task, after its retirement change,
+ * inside that commit's `adopt`), `failed` with the error that failed the Session; never after `detach()`.
  */
 export type Observer<T> = {
-	advance(change: WatchChange<T>, context: Context): void;
-	end(failure: { readonly error: unknown } | undefined): void;
+	advance(call: WatchCall<T>, context: Context): void;
+	end(end: WatchEnd): void;
 };
+
+/**
+ * A synchronous observer of stored commits (`Session.observeCommits()`): `advance` gets each `CommitPublication`, `end`
+ * the Session's close.
+ */
+export type CommitObserver = {
+	advance(publication: CommitPublication, context: Context): void;
+	end(end: WatchEnd): void;
+};
+
+/** An attached `CommitObserver`: how to detach it. Idempotent: no `advance` or `end` follows it. */
+export type CommitObservation = { detach(): void };
 
 /** An attached `Observer`: the value at attachment, which every later `advance` starts from, and how to detach it. */
 export type Observation<T> = {
@@ -1093,8 +1123,8 @@ export interface DocumentObserver {
 	): Promise<DocumentWatch<T> | undefined>;
 }
 
-/** Why a Session ended: `close()`, or a failed Storage call, whose error it carries. */
-export type SessionEnd = { readonly reason: "closed" } | { readonly reason: "failed"; readonly error: unknown };
+/** Why a Session ended, by `kind`: `close()`, or a failed Storage call, whose error it carries. */
+export type SessionEnd = { readonly kind: "closed" } | { readonly kind: "failed"; readonly error: unknown };
 
 /**
  * When a commit reaches Storage. `immediate`, the default: before `commit()` resolves. `deferred`: when every write of
@@ -1174,11 +1204,14 @@ export interface Session extends DocumentObserver {
 	 * Observe stored commits, each with exactly what it stored, except that a document the commit retires is published
 	 * as its retirement only; a commit held in memory is published when it is stored (`CommitPublication`). Storage's
 	 * adoption of the commit queues one dispatch, which runs a microtask later, before every wait the commit resolves
-	 * and every abort it queues, and calls the listeners registered by then; a commit adopted while none was registered
-	 * has no dispatch. There is no order relative to watch listeners. The listener runs synchronously and must not block
-	 * or call Session APIs.
+	 * and every abort it queues, and calls the observers attached by then; a commit adopted while none was attached has
+	 * no dispatch. There is no order relative to watch listeners. `advance` runs synchronously and must not block or
+	 * call Session APIs; a throw is reported as `listener_error`, detaches the observer, and ends it `listener_error`.
+	 * `end` is called once, when the Session closes (`ended`, after its last publication) or fails (`failed`), never
+	 * after `detach()`. Attaches synchronously; the observation has no `value`: commits are events, not a state, and the
+	 * Session does not know Storage's newest `seq` before its own first commit.
 	 */
-	subscribeCommits(listener: (publication: CommitPublication, context: Context) => void): () => void;
+	observeCommits(observer: CommitObserver): CommitObservation;
 	/**
 	 * Observe close synchronously when it begins, also when a failed Storage call closes the Session. The listener must
 	 * not block or call Session APIs.

@@ -71,7 +71,8 @@ export type NestedToolSummary = {
 /** Presentation of one live compaction task (spec §8.7). */
 export type CompactionStatus = {
 	taskId: TaskId<CompactionResult>;
-	reason: CompactionReason;
+	/** What started it: `compact()`, a threshold, or a context overflow. */
+	trigger: CompactionReason;
 	/** Whether a generation waits for it: a compaction the generation owns. */
 	blocking: boolean;
 	attempt: number;
@@ -82,7 +83,8 @@ export type CompactionStatus = {
 /** The newest compaction that failed since a compaction last produced a summary (spec §8.7). */
 export type CompactionFailure = {
 	taskId: TaskId<CompactionResult>;
-	reason: CompactionReason;
+	/** What started the compaction that failed. */
+	trigger: CompactionReason;
 	/** The failed or faulted outcome's error message, or why the scheduler orphaned the task. */
 	error: string;
 };
@@ -164,11 +166,21 @@ export type LiveState = {
 
 export const LiveDoc = defineDoc<LiveState>({
 	kind: "pi.live",
-	version: 1,
+	version: 2,
 	scope: "conversation",
 	history: "latest",
 	fork: "initial",
 	initial: () => ({}),
+	// Version 1 named a compaction's trigger `reason`, in `compactions` and `compactionFailure`.
+	migrate: (value) => {
+		const live = value as { compactions?: JsonObject[]; compactionFailure?: JsonObject };
+		const { compactions, compactionFailure } = live;
+		return {
+			...value,
+			...(compactions === undefined ? {} : { compactions: compactions.map(renameReason) }),
+			...(compactionFailure === undefined ? {} : { compactionFailure: renameReason(compactionFailure) }),
+		} as LiveState;
+	},
 	// REMINDER: a complete base whenever nothing runs (spec §8.2): no generation and no running tool slot. That holds
 	// while idle, in the commit handing a generation over to its tool round, and between tools, so the delta chain
 	// spans at most one generation or the overlapping execution of one round's tools. A slot holds output only while
@@ -179,6 +191,11 @@ export const LiveDoc = defineDoc<LiveState>({
 		!(value.tools ?? []).some((slot) => slot.status === "running") &&
 		!(value.nestedTools ?? []).some((slot) => slot.status === "running"),
 });
+
+/** A copy of a version 1 compaction status or failure with `reason` renamed `trigger`, its keys in their order. */
+function renameReason(value: JsonObject): JsonObject {
+	return Object.fromEntries(Object.entries(value).map(([key, field]) => [key === "reason" ? "trigger" : key, field]));
+}
 
 /**
  * How the progress throttles commit a partial answer and running tool output into `pi.live`: deferred, so storage gets
@@ -284,7 +301,7 @@ export function removeCompactionStatus(live: Draft<LiveState>, taskId: TaskId): 
 /** Remove the status of compaction task `taskId` and record that it failed with `error`. */
 export function failCompactionStatus(live: Draft<LiveState>, taskId: TaskId, error: string): void {
 	const status = compactionStatus(live, taskId);
-	if (status !== undefined) live.compactionFailure = { taskId: status.taskId, reason: status.reason, error };
+	if (status !== undefined) live.compactionFailure = { taskId: status.taskId, trigger: status.trigger, error };
 	removeCompactionStatus(live, taskId);
 }
 

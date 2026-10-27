@@ -109,7 +109,7 @@ export type HeldDocument = {
 	base: boolean;
 };
 
-/** What adoption publishes: to the Session's own observers, and the stored changes to `subscribeCommits()`. */
+/** What adoption publishes: to the Session's own observers, and the stored changes to `observeCommits()`. */
 export type AdoptedDocuments = {
 	/** This commit's own changes, as memory adopted them. */
 	readonly observed: readonly DocumentCommitChange[];
@@ -791,6 +791,7 @@ export class Transaction implements Tx {
 			const conversationId = plan.conversationId;
 			publications.push({
 				type: "document",
+				kind: "change",
 				record,
 				conversationId,
 				version,
@@ -883,8 +884,12 @@ export class Transaction implements Tx {
 			}
 			stored ??= [...publications];
 			if (held.observed) publications.push(publication);
-			// Only a document change of a loaded incarnation carries held operations.
-			stored.push(publication.type === "document" ? { ...publication, ops: held.ops } : publication);
+			// Only a document change of a loaded incarnation carries held operations; a retirement is published alone.
+			stored.push(
+				publication.type === "document" && publication.kind === "change"
+					? { ...publication, ops: held.ops }
+					: publication,
+			);
 		}
 		return { observed: publications, stored: stored ?? publications };
 	}
@@ -1173,15 +1178,22 @@ function planDocument(document: DocumentEntry): DocumentPlan | undefined {
 /** The publication of one adopted plan, if it publishes (`publishes()`), with `record` as committed. */
 function describe(plan: DocumentPlan, record: DocumentRecord): DocumentCommitChange | undefined {
 	const conversationId = plan.conversationId;
-	if (plan.retire)
-		return { type: "document", record, conversationId, version: undefined, value: null, ops: EMPTY_OPERATIONS };
+	if (plan.retire) return { type: "document", kind: "retire", record, conversationId };
 	if (plan.content?.type === "document.copy") {
 		return { type: "document.copy", record, conversationId: conversationId!, source: plan.content.source };
 	}
 	const change = plan.change;
 	if (change === undefined || !publishes(plan)) return undefined;
 	const ops = change.loaded === undefined ? EMPTY_OPERATIONS : change.prepared.ops;
-	return { type: "document", record, conversationId, version: change.version, value: change.prepared.value, ops };
+	return {
+		type: "document",
+		kind: "change",
+		record,
+		conversationId,
+		version: change.version,
+		value: change.prepared.value,
+		ops,
+	};
 }
 
 /**

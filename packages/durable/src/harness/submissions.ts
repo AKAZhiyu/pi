@@ -57,7 +57,7 @@ export class Submissions {
 		this.#now = now;
 		this.#queueModes = queueModes;
 		this.#resume = resume;
-		session.observeCommits((publication) => this.#observe(publication));
+		session.followCommits((publication) => this.#observe(publication));
 		session.subscribeClose(() => {
 			this.#closed = true;
 			this.#waiters.rejectAll(closedError(this.#session));

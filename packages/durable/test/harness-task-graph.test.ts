@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
-import { ControlledStorage, context, flush } from "./session-support.ts";
+import { ControlledStorage, context, flush, onValue } from "./session-support.ts";
 import { aborted, completed, deferred, eventually, openTasks } from "./task-support.ts";
 
 type ParentState = { phase: "spawn" } | { phase: "join"; child: TaskId } | { phase: "finish" };
@@ -92,9 +92,11 @@ describe("task graph view", () => {
 		const seen: TaskGraph[] = [];
 		const observe = async () => {
 			const opened = await harness.watchTaskGraph(context);
-			opened.start(async ({ value }) => {
-				seen.push(value);
-			});
+			opened.start(
+				onValue(async ({ value }) => {
+					seen.push(value);
+				}),
+			);
 			return opened;
 		};
 		let graph = await observe();
@@ -217,11 +219,13 @@ describe("task graph view", () => {
 		// Exact frames: replaying their operations from the acquisition revision gives each delivered value.
 		let replica: JsonValue = watch.value as unknown as JsonValue;
 		const frames: (readonly Op[])[] = [];
-		watch.start(async ({ value, ops }) => {
-			replica = applyImmutable(replica, ops);
-			expect(replica).toEqual(value);
-			frames.push(ops);
-		});
+		watch.start(
+			onValue(async ({ value, ops }) => {
+				replica = applyImmutable(replica, ops);
+				expect(replica).toEqual(value);
+				frames.push(ops);
+			}),
+		);
 		harness.resume();
 		await eventually(() => watch.value.tasks[String(background)]?.state.status === "running");
 		expect(await harness.abortTask(background, context)).toBe("marked");
@@ -336,9 +340,11 @@ describe("task graph view", () => {
 		const second = await harness.watchTaskGraph(context);
 		expect(second.value).toBe(first.value);
 		const updates: string[] = [];
-		first.start(async ({ value }) => {
-			updates.push(value.tasks[String(id)]?.state.status ?? "gone");
-		});
+		first.start(
+			onValue(async ({ value }) => {
+				updates.push(value.tasks[String(id)]?.state.status ?? "gone");
+			}),
+		);
 		harness.resume();
 		await reached.promise;
 		await flush();

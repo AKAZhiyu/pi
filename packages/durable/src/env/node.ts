@@ -641,7 +641,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			);
 			const afterOpenAbort = abortResult<FileWatcher>(context.abortSignal);
 			if (afterOpenAbort) {
-				await watcher.close(context);
+				await watcher.stop(context);
 				return afterOpenAbort;
 			}
 			return ok(watcher);

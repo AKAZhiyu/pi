@@ -258,7 +258,7 @@ export async function createCompaction(
 		owner === undefined ? ({ kind: "conversation" } as const) : { kind: "task" as const, taskId: owner };
 	const background = owner === undefined && input.reason !== "manual";
 	const taskId = await tx.createTask(CompactionTask, input, { ownership, conversationId, background });
-	const status = { taskId, reason: input.reason, blocking: owner !== undefined, attempt: 1 };
+	const status = { taskId, trigger: input.reason, blocking: owner !== undefined, attempt: 1 };
 	addCompactionStatus(await tx.doc(LiveDoc, conversationId), status);
 	return taskId;
 }

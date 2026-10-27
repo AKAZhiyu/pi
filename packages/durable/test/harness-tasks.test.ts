@@ -21,7 +21,7 @@ import {
 import { InMemoryTelemetryContext } from "@earendil-works/pi-telemetry";
 import { describe, expect, it } from "vitest";
 import { addHooks, addTask, addTool, user } from "./harness-support.ts";
-import { ControlledStorage, context, flush, LateResolvingStorage, observeCommits } from "./session-support.ts";
+import { ControlledStorage, context, flush, followCommits, LateResolvingStorage, onValue } from "./session-support.ts";
 import { aborted, abortedWith, completed, deferred, eventually, openTasks, settled } from "./task-support.ts";
 
 type Step = { phase: "run" };
@@ -548,9 +548,11 @@ describe("task runtime", () => {
 			handlerContext = ctx;
 			absent = await runtime.watchDoc(Absent, ctx);
 			const watch = await runtime.watchDoc(Notes, ctx);
-			watch!.start(async ({ value }) => {
-				delivered.push(value.text);
-			});
+			watch!.start(
+				onValue(async ({ value }) => {
+					delivered.push(value.text);
+				}),
+			);
 			watchClosed = watch?.closed;
 			await runtime.commit(() => completed(null), ctx);
 		});
@@ -563,7 +565,7 @@ describe("task runtime", () => {
 		await harness.waitForTask(id, context);
 		expect(absent).toBeUndefined();
 		// The watch stops when the step after the phase ends the invocation; later commits deliver nothing.
-		expect(await watchClosed).toEqual({ reason: "stopped" });
+		expect(await watchClosed).toEqual({ kind: "stopped" });
 		await harness.commit(async (tx) => {
 			(await tx.doc(Notes)).text = "after";
 		}, context);
@@ -712,7 +714,7 @@ describe("task scheduling", () => {
 		storage.failNextCommit(failure);
 		harness.resume();
 		const end = await harness.closed;
-		expect(end).toEqual({ reason: "failed", error: failure });
+		expect(end).toEqual({ kind: "failed", error: failure });
 		expect(reports).toEqual([failure]);
 		// The pending wait and every later call get SessionFailed with the storage error.
 		await expect(waiting).rejects.toMatchObject({ name: "SessionFailed", cause: failure });
@@ -743,7 +745,7 @@ describe("task scheduling", () => {
 		const { harness, root, reports } = await openRoot([Throws], { storage });
 		const id = await start(root, Throws);
 		harness.resume();
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(runs).toBe(1);
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
@@ -1201,7 +1203,7 @@ describe("task close", () => {
 		await reached.promise;
 		await harness.close(context);
 		await expect(fromListener).rejects.toThrow("closed");
-		expect(watchEnd).toEqual({ reason: "ended" });
+		expect(watchEnd).toEqual({ kind: "ended" });
 	});
 
 	it("writes no fault when close seals while the step after a failed phase is queued", async () => {
@@ -1385,15 +1387,18 @@ describe("publication at adoption", () => {
 	const endsTask = (writes: readonly StorageWrite[]): boolean =>
 		writes.some((write) => write.type === "task" && write.value.state.status === "terminal");
 
-	it("resumes task and idle waits only once subscribeCommits() listeners saw the terminal commit", async () => {
+	it("resumes task and idle waits only once observeCommits() observers saw the terminal commit", async () => {
 		const gate = deferred();
 		const Gated = gated("test.wake-gated", gate.promise);
 		const { harness, root } = await openRoot([Gated], { storage: new LateResolvingStorage() });
 		const seen = new Set<TaskId>();
-		harness.subscribeCommits((publication) => {
-			for (const change of publication.changes) {
-				if (change.type === "task" && change.value.state.status === "terminal") seen.add(change.value.id);
-			}
+		harness.observeCommits({
+			advance: (publication) => {
+				for (const change of publication.changes) {
+					if (change.type === "task" && change.value.state.status === "terminal") seen.add(change.value.id);
+				}
+			},
+			end: () => {},
 		});
 		const id = await start(root, Gated);
 		harness.resume();
@@ -1413,8 +1418,11 @@ describe("publication at adoption", () => {
 			const { harness, root } = await openRoot([Gated], { storage });
 			const order: string[] = [];
 			const id = await start(root, Gated);
-			harness.subscribeCommits((publication) => {
-				if (terminal(publication, id)) order.push(`host adopting=${storage.adopting}`);
+			harness.observeCommits({
+				advance: (publication) => {
+					if (terminal(publication, id)) order.push(`host adopting=${storage.adopting}`);
+				},
+				end: () => {},
 			});
 			harness.resume();
 			const waited = harness.waitForTask(id, context).then(() => order.push("wait"));
@@ -1435,9 +1443,13 @@ describe("publication at adoption", () => {
 			});
 			const { harness, root } = await openRoot([Signalled], { storage });
 			const id = await start(root, Signalled);
-			harness.subscribeCommits((publication) => {
-				for (const change of publication.changes)
-					if (change.type === "task" && change.value.id === id && change.value.abortRequested) order.push("host");
+			harness.observeCommits({
+				advance: (publication) => {
+					for (const change of publication.changes)
+						if (change.type === "task" && change.value.id === id && change.value.abortRequested)
+							order.push("host");
+				},
+				end: () => {},
 			});
 			harness.resume();
 			await reached.promise;
@@ -1454,8 +1466,11 @@ describe("publication at adoption", () => {
 		const { harness, root } = await openRoot([Gated], { storage });
 		const order: string[] = [];
 		const id = await start(root, Gated);
-		harness.subscribeCommits((publication) => {
-			if (terminal(publication, id)) order.push("host");
+		harness.observeCommits({
+			advance: (publication) => {
+				if (terminal(publication, id)) order.push("host");
+			},
+			end: () => {},
 		});
 		const gapped = deferred();
 		let idle: Promise<unknown> | undefined;
@@ -1481,8 +1496,11 @@ describe("publication at adoption", () => {
 		const { harness, root, infos } = await openRoot([Gated], { storage, telemetry });
 		const id = await start(root, Gated);
 		const seen: string[] = [];
-		harness.subscribeCommits((publication) => {
-			if (terminal(publication, id)) seen.push("terminal");
+		harness.observeCommits({
+			advance: (publication) => {
+				if (terminal(publication, id)) seen.push("terminal");
+			},
+			end: () => {},
 		});
 		storage.rejectAfterAdopt = endsTask;
 		harness.resume();
@@ -1490,8 +1508,8 @@ describe("publication at adoption", () => {
 		gate.resolve();
 		expect((await waited).state.outcome).toEqual({ status: "completed", result: null });
 		expect(seen).toEqual(["terminal"]);
-		expect(await harness.closed).toEqual({ reason: "failed", error: new Error("reclaim failed") });
-		expect(infos).toContainEqual({ type: "session_failed" });
+		expect(await harness.closed).toEqual({ kind: "failed", error: new Error("reclaim failed") });
+		expect(infos).toContainEqual({ kind: "storage_failed" });
 		const active = telemetry.getMetrics().filter((metric) => metric.name === "pi.durable.tasks.active");
 		expect(active.map((metric) => metric.value)).toEqual([1, -1]);
 	});
@@ -1503,7 +1521,7 @@ describe("publication at adoption", () => {
 		const { harness, root } = await openRoot([Idle], { storage, telemetry });
 		storage.rejectAfterAdopt = (writes) => writes.some((write) => write.type === "task");
 		await expect(start(root, Idle)).rejects.toThrow("reclaim failed");
-		expect(await harness.closed).toMatchObject({ reason: "failed" });
+		expect(await harness.closed).toMatchObject({ kind: "failed" });
 		const active = telemetry.getMetrics().filter((metric) => metric.name === "pi.durable.tasks.active");
 		expect(active.map((metric) => metric.value)).toEqual([1, -1]);
 	});
@@ -1514,8 +1532,11 @@ describe("publication at adoption", () => {
 		const { harness, root } = await openRoot([Gated]);
 		const id = await start(root, Gated);
 		let closing: Promise<void> | undefined;
-		harness.subscribeCommits((publication) => {
-			if (terminal(publication, id)) closing = harness.close(context);
+		harness.observeCommits({
+			advance: (publication) => {
+				if (terminal(publication, id)) closing = harness.close(context);
+			},
+			end: () => {},
 		});
 		harness.resume();
 		const waited = harness.waitForTask(id, context);
@@ -1547,24 +1568,24 @@ describe("publication at adoption", () => {
 		await gapped.promise;
 		await closing;
 		expect(await waited).toEqual({ status: "completed", result: null });
-		expect(await harness.closed).toEqual({ reason: "closed" });
+		expect(await harness.closed).toEqual({ kind: "closed" });
 	});
 
 	it("fails the Session with the storage error when it rejects after adopting, and reports an observer's throw", async () => {
 		const storage = new LateResolvingStorage();
 		const { harness, root, reports, infos } = await openRoot([], { storage });
 		const bug = new Error("observer bug");
-		observeCommits(harness, (publication) => {
+		followCommits(harness, (publication) => {
 			if (publication.kind === "stored" && publication.changes.some((change) => change.type === "entry")) throw bug;
 		});
 		storage.rejectAfterAdopt = (writes) => writes.some((write) => write.type === "entry");
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context)).rejects.toThrow(
 			"reclaim failed",
 		);
-		expect(await harness.closed).toEqual({ reason: "failed", error: new Error("reclaim failed") });
+		expect(await harness.closed).toEqual({ kind: "failed", error: new Error("reclaim failed") });
 		expect(reports).toContain(bug);
-		expect(infos[reports.indexOf(bug)]).toEqual({ type: "listener_error" });
-		expect(infos).toContainEqual({ type: "session_failed" });
+		expect(infos[reports.indexOf(bug)]).toEqual({ kind: "listener_error" });
+		expect(infos).toContainEqual({ kind: "storage_failed" });
 	});
 
 	it("stores a host listener's own commit before the reconcile commit that the same publication asks for", async () => {
@@ -1582,13 +1603,16 @@ describe("publication at adoption", () => {
 		const parent = await start(root, Parent);
 		harness.resume();
 		await eventually(async () => (await harness.getTask(parent, context))?.state.status === "completing");
-		harness.subscribeCommits((publication) => {
-			const child = publication.changes.find(
-				(change) =>
-					change.type === "task" && change.value.id !== parent && change.value.state.status === "terminal",
-			);
-			if (child !== undefined)
-				void root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
+		harness.observeCommits({
+			advance: (publication) => {
+				const child = publication.changes.find(
+					(change) =>
+						change.type === "task" && change.value.id !== parent && change.value.state.status === "terminal",
+				);
+				if (child !== undefined)
+					void root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
+			},
+			end: () => {},
 		});
 		const before = storage.commits.length;
 		gate.resolve();
@@ -1608,11 +1632,14 @@ describe("publication at adoption", () => {
 		const { harness, root } = await openRoot([], { storage });
 		const note = () => root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
 		const late: number[] = [];
-		let stopLate = (): void => {};
+		let stopLate = { detach: (): void => {} };
 		// No host listener at adopt, although the Harness's own observers run: no dispatch, so the late one misses it.
 		storage.afterAdopt = () => {
-			stopLate = harness.subscribeCommits((publication) => {
-				late.push(publication.seq);
+			stopLate = harness.observeCommits({
+				advance: (publication) => {
+					late.push(publication.seq);
+				},
+				end: () => {},
 			});
 		};
 		await note();
@@ -1620,13 +1647,16 @@ describe("publication at adoption", () => {
 		expect(late).toEqual([]);
 		await note();
 		expect(late).toHaveLength(1);
-		stopLate();
+		stopLate.detach();
 		// One registered at adopt: the dispatch reads the listeners when it runs, the late one included.
-		harness.subscribeCommits(() => {});
+		harness.observeCommits({ advance: () => {}, end: () => {} });
 		const second: number[] = [];
 		storage.afterAdopt = () => {
-			harness.subscribeCommits((publication) => {
-				second.push(publication.seq);
+			harness.observeCommits({
+				advance: (publication) => {
+					second.push(publication.seq);
+				},
+				end: () => {},
 			});
 		};
 		await note();

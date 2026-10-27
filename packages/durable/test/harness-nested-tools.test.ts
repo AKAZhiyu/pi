@@ -38,7 +38,7 @@ import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
 import { allEntries, type ChatSetup, chatSetup, openChat } from "./chat-support.ts";
 import { addHooks, addTool } from "./harness-support.ts";
 import { endedAt, nestedResultOf, nestedResults, slotsOf, startOrder, viewHistory } from "./live-support.ts";
-import { context } from "./session-support.ts";
+import { context, onValue } from "./session-support.ts";
 import { aborted, deferred, eventually } from "./task-support.ts";
 
 const Parameters = Type.Object({ text: Type.Optional(Type.String()) });
@@ -870,12 +870,14 @@ describe("nested tool calls", () => {
 		// Each value's operations rebuild the next one, the late subscriber's starting value included.
 		let replayed = watch.value;
 		const outputs: [string | undefined, string | undefined][] = [];
-		watch.start(async ({ value, ops }) => {
-			replayed = applyImmutable(replayed, ops);
-			expect(replayed).toEqual(value);
-			const [one, two] = nestedOf(value);
-			outputs.push([one?.output, two?.output]);
-		});
+		watch.start(
+			onValue(async ({ value, ops }) => {
+				replayed = applyImmutable(replayed, ops);
+				expect(replayed).toEqual(value);
+				const [one, two] = nestedOf(value);
+				outputs.push([one?.output, two?.output]);
+			}),
+		);
 		// The second slot writes first, so a wrong slot index in the update path would show.
 		wrote.two.resolve();
 		await eventually(() => outputs.at(-1)?.[1] === "two\n");

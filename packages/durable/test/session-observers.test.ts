@@ -1,9 +1,10 @@
 // Tests for `Session.observeDoc()`, the synchronous observer of one document address that watches are built on.
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
-import type { WatchChange } from "@earendil-works/chord";
+import type { WatchCall, WatchEnd } from "@earendil-works/chord";
 import { withAbortSignal } from "@earendil-works/chord/context";
 import {
+	type CommitObserver,
 	type ConversationId,
 	defineDoc,
 	MemoryStorage,
@@ -40,7 +41,7 @@ const ConversationCounter = defineDoc<Counter>({
 class ReportingSession extends SessionImpl {
 	readonly reports: { readonly error: unknown; readonly info: ReportInfo }[] = [];
 
-	override report(error: unknown, info: ReportInfo = { type: "listener_error" }): void {
+	override report(error: unknown, info: ReportInfo = { kind: "listener_error" }): void {
 		this.reports.push({ error, info });
 	}
 }
@@ -48,15 +49,14 @@ class ReportingSession extends SessionImpl {
 /** An observer that records each call, and whether it ran inside the storage's `adopt`. */
 function recorder(storage: ControlledStorage) {
 	const calls: Array<
-		| { readonly advance: WatchChange<Readonly<Counter>>; readonly adopting: boolean }
-		| { readonly end: { readonly error: unknown } | undefined }
+		{ readonly advance: WatchCall<Readonly<Counter>>; readonly adopting: boolean } | { readonly end: WatchEnd }
 	> = [];
 	const observer: Observer<Readonly<Counter>> = {
 		advance: (change) => {
 			calls.push({ advance: change, adopting: storage.adopting });
 		},
-		end: (failure) => {
-			calls.push({ end: failure });
+		end: (end) => {
+			calls.push({ end });
 		},
 	};
 	return { calls, observer };
@@ -93,7 +93,10 @@ describe("observeDoc", () => {
 		const committing = add(session, 2);
 		await committing;
 		expect(calls).toEqual([
-			{ advance: { value: { count: 3 }, ops: [["s", ["count"], 3]], retired: false }, adopting: true },
+			{
+				advance: { kind: "value", value: { count: 3 }, ops: [["s", ["count"], 3]], retired: false },
+				adopting: true,
+			},
 		]);
 		observation.detach();
 		await session.close(context);
@@ -117,7 +120,10 @@ describe("observeDoc", () => {
 		);
 		expect(storage.commits).toHaveLength(stored);
 		expect(calls).toEqual([
-			{ advance: { value: { count: 5 }, ops: [["s", ["count"], 5]], retired: false }, adopting: false },
+			{
+				advance: { kind: "value", value: { count: 5 }, ops: [["s", ["count"], 5]], retired: false },
+				adopting: false,
+			},
 		]);
 		observation.detach();
 		await session.close(context);
@@ -140,10 +146,15 @@ describe("observeDoc", () => {
 			(await tx.doc(ConversationCounter, conversationId)).count = 9;
 		}, context);
 		expect(calls).toEqual([
-			{ advance: { value: observation.value, ops: [], retired: true }, adopting: true },
-			{ advance: { value: { count: 9 }, ops: [["r", { count: 9 }]], retired: false }, adopting: true },
+			{ advance: { kind: "value", value: observation.value, ops: [], retired: true }, adopting: true },
+			{
+				advance: { kind: "value", value: { count: 9 }, ops: [["r", { count: 9 }]], retired: false },
+				adopting: true,
+			},
 		]);
-		expect((calls[0] as { advance: WatchChange<Counter> }).advance.value).toBe(observation.value);
+		expect((calls[0] as { advance: Extract<WatchCall<Counter>, { kind: "value" }> }).advance.value).toBe(
+			observation.value,
+		);
 		observation.detach();
 		await session.close(context);
 	});
@@ -168,7 +179,7 @@ describe("observeDoc", () => {
 		const { calls, observer } = recorder(storage);
 		await session.observeDoc(SessionCounter, observer, context);
 		await session.close(context);
-		expect(calls).toEqual([{ end: undefined }]);
+		expect(calls).toEqual([{ end: { kind: "ended" } }]);
 	});
 
 	it("ends with the error that failed the Session", async () => {
@@ -180,7 +191,7 @@ describe("observeDoc", () => {
 		storage.failNextCommit(failure);
 		await expect(add(session)).rejects.toThrow("disk gone");
 		await session.closed;
-		expect(calls).toEqual([{ end: { error: failure } }]);
+		expect(calls).toEqual([{ end: { kind: "failed", error: failure } }]);
 	});
 
 	it("reports a throwing observer, detaches it and ends it with the error; the commit and other observers go on", async () => {
@@ -192,15 +203,15 @@ describe("observeDoc", () => {
 			advance: () => {
 				throw bug;
 			},
-			end: (failure) => ends.push(failure),
+			end: (end) => ends.push(end),
 		};
 		await session.observeDoc(SessionCounter, throwing, context);
 		const healthy = recorder(storage);
 		await session.observeDoc(SessionCounter, healthy.observer, context);
 		await add(session);
 		await add(session);
-		expect(session.reports).toEqual([{ error: bug, info: { type: "listener_error" } }]);
-		expect(ends).toEqual([{ error: bug }]);
+		expect(session.reports).toEqual([{ error: bug, info: { kind: "listener_error" } }]);
+		expect(ends).toEqual([{ kind: "listener_error", error: bug }]);
 		expect(healthy.calls).toHaveLength(2);
 		expect(await session.snapshot(SessionCounter, context)).toEqual({ count: 3 });
 		await session.close(context);
@@ -299,7 +310,7 @@ describe("observeDoc", () => {
 				conversationId,
 				{
 					advance: (change) => {
-						if (!change.retired) last = new WeakRef(change.value);
+						if (change.kind === "value" && !change.retired) last = new WeakRef(change.value);
 					},
 					end: () => {},
 				},
@@ -317,6 +328,103 @@ describe("observeDoc", () => {
 		expect(last.deref()).toBeUndefined();
 		observation.detach();
 		await session.close(context);
+	});
+});
+
+describe("observeDoc throwing asynchronously", () => {
+	it("reports an observer whose call returns a rejected promise, then detaches it and ends it `listener_error`", async () => {
+		const { session } = open();
+		await add(session);
+		const bug = new Error("async observer bug");
+		const ends: WatchEnd[] = [];
+		let calls = 0;
+		const observer = {
+			advance: async () => {
+				calls++;
+				throw bug;
+			},
+			end: (end: WatchEnd) => ends.push(end),
+		};
+		await session.observeDoc(SessionCounter, observer, context);
+		await add(session);
+		await flush();
+		await add(session);
+		expect(calls).toBe(1);
+		expect(session.reports).toEqual([{ error: bug, info: { kind: "listener_error" } }]);
+		expect(ends).toEqual([{ kind: "listener_error", error: bug }]);
+		await session.close(context);
+		expect(ends).toHaveLength(1);
+	});
+});
+
+describe("observeCommits", () => {
+	/** A commit observer recording each seq and its end. */
+	function commits() {
+		const calls: Array<{ readonly seq: number } | { readonly end: WatchEnd }> = [];
+		const observer: CommitObserver = {
+			advance: (publication) => calls.push({ seq: publication.seq }),
+			end: (end) => calls.push({ end }),
+		};
+		return { calls, observer };
+	}
+
+	it("gets every stored commit, then `ended` once the Session closed, after its last publication", async () => {
+		const { session } = open();
+		const { calls, observer } = commits();
+		session.observeCommits(observer);
+		await add(session);
+		await add(session);
+		await session.close(context);
+		expect(calls).toEqual([{ seq: expect.any(Number) }, { seq: expect.any(Number) }, { end: { kind: "ended" } }]);
+	});
+
+	it("ends `failed` with the error that failed the Session", async () => {
+		const { storage, session } = open();
+		const { calls, observer } = commits();
+		session.observeCommits(observer);
+		const failure = new Error("disk gone");
+		storage.failNextCommit(failure);
+		await expect(add(session)).rejects.toThrow("disk gone");
+		await session.closed;
+		expect(calls).toEqual([{ end: { kind: "failed", error: failure } }]);
+	});
+
+	it("gets nothing after detach, which is idempotent, not even its end", async () => {
+		const { session } = open();
+		const { calls, observer } = commits();
+		const observation = session.observeCommits(observer);
+		await add(session);
+		await flush();
+		observation.detach();
+		observation.detach();
+		await add(session);
+		await session.close(context);
+		expect(calls).toHaveLength(1);
+	});
+
+	it("reports a throwing observer, detaches it and ends it `listener_error`; the others go on", async () => {
+		const { session } = open();
+		const bug = new Error("commit observer bug");
+		const ends: WatchEnd[] = [];
+		let thrown = 0;
+		session.observeCommits({
+			advance: () => {
+				thrown++;
+				throw bug;
+			},
+			end: (end) => ends.push(end),
+		});
+		const healthy = commits();
+		session.observeCommits(healthy.observer);
+		await add(session);
+		await add(session);
+		await flush();
+		expect(thrown).toBe(1);
+		expect(session.reports).toEqual([{ error: bug, info: { kind: "listener_error" } }]);
+		expect(ends).toEqual([{ kind: "listener_error", error: bug }]);
+		expect(healthy.calls).toHaveLength(2);
+		await session.close(context);
+		expect(ends).toHaveLength(1);
 	});
 });
 
@@ -339,7 +447,7 @@ describe("observeDoc detached during a commit", () => {
 	it("gets nothing more of the commit once it throws on the retirement, and pins nothing for the recreation", async () => {
 		const { session, conversationId, recreate } = await retiring();
 		const bug = new Error("observer bug");
-		const changes: WatchChange<Readonly<Counter>>[] = [];
+		const changes: WatchCall<Readonly<Counter>>[] = [];
 		const ends: unknown[] = [];
 		const observation = (await session.observeDoc(
 			ConversationCounter,
@@ -349,14 +457,14 @@ describe("observeDoc detached during a commit", () => {
 					changes.push(change);
 					throw bug;
 				},
-				end: (failure) => ends.push(failure),
+				end: (end) => ends.push(end),
 			},
 			context,
 		))!;
 		await recreate();
-		expect(changes).toEqual([{ value: observation.value, ops: [], retired: true }]);
-		expect(ends).toEqual([{ error: bug }]);
-		expect(session.reports).toEqual([{ error: bug, info: { type: "listener_error" } }]);
+		expect(changes).toEqual([{ kind: "value", value: observation.value, ops: [], retired: true }]);
+		expect(ends).toEqual([{ kind: "listener_error", error: bug }]);
+		expect(session.reports).toEqual([{ error: bug, info: { kind: "listener_error" } }]);
 		expect(session.documentCacheSizes.attached).toBe(0);
 		observation.detach();
 		expect(session.documentCacheSizes.attached).toBe(0);
@@ -365,7 +473,7 @@ describe("observeDoc detached during a commit", () => {
 
 	it("gets nothing more of the commit once it detaches in the retirement call, and pins nothing", async () => {
 		const { session, conversationId, recreate } = await retiring();
-		const changes: WatchChange<Readonly<Counter>>[] = [];
+		const changes: WatchCall<Readonly<Counter>>[] = [];
 		const ends: unknown[] = [];
 		let observation: Observation<Readonly<Counter>> | undefined;
 		observation = await session.observeDoc(
@@ -376,12 +484,12 @@ describe("observeDoc detached during a commit", () => {
 					changes.push(change);
 					observation?.detach();
 				},
-				end: (failure) => ends.push(failure),
+				end: (end) => ends.push(end),
 			},
 			context,
 		);
 		await recreate();
-		expect(changes).toEqual([{ value: observation!.value, ops: [], retired: true }]);
+		expect(changes).toEqual([{ kind: "value", value: observation!.value, ops: [], retired: true }]);
 		expect(session.documentCacheSizes.attached).toBe(0);
 		await session.close(context);
 		expect(ends).toEqual([]);

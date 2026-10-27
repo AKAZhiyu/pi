@@ -88,7 +88,7 @@ export async function openTasks(
 		{
 			models: createModels(),
 			registry,
-			onReport: (error, info) => {
+			onReport: ({ error, ...info }) => {
 				reports.push(error);
 				infos.push(info);
 			},

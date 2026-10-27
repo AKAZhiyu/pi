@@ -33,7 +33,7 @@ import type {
 	Observation,
 	Observer,
 	Page,
-	ReportInfo,
+	Report,
 	Session,
 	SetTimer,
 	SubmissionId,
@@ -674,11 +674,11 @@ export type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
 	readonly onWake?: (wake: Wake) => void;
 	/**
 	 * Receives failures that do not fail the calling operation, such as a throwing hook or listener, a task that faulted,
-	 * and the error that fails the Session, once. `info` says what happened: a host can tell a failed Session
-	 * (`session_failed`, often a platform reset) from a faulted task (`task_faulted`).
-	 * Its own throw or rejection is dropped.
+	 * and the error that fails the Session, once: one `Report`, the `error` and what happened (`kind` and the fields of
+	 * its `ReportInfo`). A host can tell a failed Session (`storage_failed`, often a platform reset) from a faulted task
+	 * (`task_faulted`). Its own throw or rejection is dropped.
 	 */
-	readonly onReport?: (error: unknown, info: ReportInfo) => void;
+	readonly onReport?: (report: Report) => void;
 	/**
 	 * Open for reading only, as a viewer of a session that another process drives, for example a synced copy on a device
 	 * that only shows it. Open recovers nothing: a `running` task stays as committed. Every commit with writes rejects
@@ -704,7 +704,7 @@ export type TaskInspection = {
 	readonly state: /** An invocation is active. */
 		| { readonly kind: "running" }
 		/** The next scheduling pass reserves it; `migrates` when its definition is newer and has `migrate`. */
-		| { readonly kind: "ready"; readonly migrates: boolean }
+		| { readonly kind: "pending"; readonly migrates: boolean }
 		/**
 		 * Waits for these live tasks: the live part of its `on`, or, when abort-marked, its live ordinary owned work, which
 		 * must end before its abort handler starts.

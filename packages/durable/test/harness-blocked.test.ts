@@ -125,7 +125,7 @@ describe("recovery at open", () => {
 		});
 		const wakes: Wake[] = [];
 		const { harness } = await openTasks(failing, [], { registry, onWake: (wake) => wakes.push(wake) });
-		expect((await harness.closed).reason).toBe("failed");
+		expect((await harness.closed).kind).toBe("failed");
 		// The host was told work is underway, and never that it ended: its recovery alarm stays.
 		expect(wakes).toEqual([{ active: true }]);
 	});
@@ -153,7 +153,10 @@ describe("tasks that cannot run", () => {
 		expect((await harness.getTask(id, context))?.restarts).toBe(3);
 		// Nothing is parked: the task is ready, and the host is asked to run, which ends it.
 		const inspection = await harness.inspect(context);
-		expect(inspection.tasks.find((task) => task.record.id === id)?.state).toEqual({ kind: "ready", migrates: false });
+		expect(inspection.tasks.find((task) => task.record.id === id)?.state).toEqual({
+			kind: "pending",
+			migrates: false,
+		});
 		expect(harness.wake().active).toBe(true);
 		harness.resume();
 		const settled = await harness.waitForTask(id, context);
@@ -168,7 +171,7 @@ describe("tasks that cannot run", () => {
 		await eventually(() => infos.length > 0);
 		expect(infos).toEqual([
 			{
-				type: "task_faulted",
+				kind: "task_faulted",
 				task: { id, kind: "test.crash-loop", conversationId: root.id },
 				extension: "loop",
 				reason: "restart_limit",
@@ -263,7 +266,7 @@ describe("tasks that cannot run", () => {
 		expect(settled.restarts).toBeUndefined();
 		expect(aborts).toBe(1);
 		await eventually(() => opened.infos.length > 0);
-		expect(opened.infos).toMatchObject([{ type: "task_faulted", task: { id }, reason: "restart_limit" }]);
+		expect(opened.infos).toMatchObject([{ kind: "task_faulted", task: { id }, reason: "restart_limit" }]);
 		await opened.harness.close(context);
 	});
 

@@ -64,8 +64,8 @@ async function listed(
 
 /** Whether a change reports `path`: an overflow, or a reported path at or above it. */
 function covers(change: FileChange, path: string): boolean {
-	if ("overflow" in change) return true;
-	if (!("paths" in change)) return false;
+	if (change.kind === "overflow") return true;
+	if (change.kind !== "paths") return false;
 	return change.paths.some(
 		(reported) => path === reported || path.startsWith(`${reported}/`) || path.startsWith(`${reported}\\`),
 	);
@@ -103,7 +103,7 @@ async function watching(
 			},
 		});
 	} finally {
-		await watcher.close(context);
+		await watcher.stop(context);
 	}
 }
 
@@ -346,7 +346,7 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 				});
 				const hidden = [await absolute("skills/node_modules"), await absolute("skills/.SKILL.md.tmp")];
 				for (const change of changes) {
-					if (!("paths" in change)) continue;
+					if (change.kind !== "paths") continue;
 					for (const path of change.paths) {
 						assert.ok(
 							!hidden.some((excluded) => path === excluded || path.startsWith(excluded)),
@@ -383,12 +383,12 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 			});
 		}),
 
-		watchCase("watch stops reporting once closed", async (env) => {
+		watchCase("watch stops reporting once stopped", async (env) => {
 			const changes: FileChange[] = [];
 			const watcher = getOrThrow(await env.watch([{ path: "file.txt" }], (change) => changes.push(change), context));
 			assert.ok(watcher.mode === "native" || watcher.mode === "polling", "watcher reports its mode");
-			await watcher.close(context);
-			await watcher.close(context);
+			await watcher.stop(context);
+			await watcher.stop(context);
 			getOrThrow(await env.writeFile("file.txt", "x", context));
 			await new Promise((resolve) => setTimeout(resolve, 300));
 			assert.deepEqual(changes, []);

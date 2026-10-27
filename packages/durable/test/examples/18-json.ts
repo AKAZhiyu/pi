@@ -73,11 +73,15 @@ const root = await harness.root(context, { agent: { model } });
 const watch = await root.watch(context);
 if (mode === "ops") {
 	print({ view: watch.value });
-	watch.start(async ({ ops }) => print({ ops }));
+	watch.start(async (call) => {
+		if (call.kind === "value") print({ ops: call.ops });
+	});
 } else {
 	let newest = watch.value.entries.at(-1)?.id ?? 0;
 	print({ entries: watch.value.entries, live: watch.value.docs["pi.live"] });
-	watch.start(async ({ value }) => {
+	watch.start(async (call) => {
+		if (call.kind !== "value") return;
+		const { value } = call;
 		const entries = value.entries.filter((entry) => entry.id > newest);
 		newest = value.entries.at(-1)?.id ?? newest;
 		print({ ...(entries.length === 0 ? {} : { entries }), live: value.docs["pi.live"] });

@@ -182,7 +182,7 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 				env = await runtime.env(context);
 			} catch (error) {
 				if (context.abortSignal?.aborted) throw error;
-				runtime.report(error, { type: "host", callback: "env" });
+				runtime.report(error, { kind: "host", callback: "env" });
 			}
 			const input: PromptInput = { conversationId, agent, env, shown: Object.fromEntries(shown), read: runtime };
 			const desired = await renderSections(
@@ -191,7 +191,7 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 				shown,
 				(error, section) =>
 					runtime.report(error, {
-						type: "extension",
+						kind: "extension",
 						...optionalExtension(sectionExtension(agent, section.key)),
 					}),
 				context,
@@ -513,7 +513,7 @@ async function cancelDeferred(
 			telemetry: context.telemetry,
 		});
 	} catch (error) {
-		runtime.report(error, { type: "host", callback: "models" });
+		runtime.report(error, { kind: "host", callback: "models" });
 	}
 }
 

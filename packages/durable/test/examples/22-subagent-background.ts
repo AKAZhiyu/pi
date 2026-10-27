@@ -284,7 +284,9 @@ function contentText(content: string | readonly { type: string; text?: string }[
 async function follow(harness: Harness, id: ConversationId): Promise<void> {
 	const watch = await (await harness.conversation(id, context))!.watch(context);
 	let newest = watch.value.entries.at(-1)?.id ?? 0;
-	watch.start(async ({ value }) => {
+	watch.start(async (call) => {
+		if (call.kind !== "value") return;
+		const { value } = call;
 		const entries = value.entries.filter((entry) => entry.id > newest);
 		newest = value.entries.at(-1)?.id ?? newest;
 		for (const entry of entries) {

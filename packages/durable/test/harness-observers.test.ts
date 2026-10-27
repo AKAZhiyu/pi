@@ -2,7 +2,7 @@
 // document) and for task document watches, which end with their task.
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
-import type { WatchChange } from "@earendil-works/chord";
+import type { WatchCall } from "@earendil-works/chord";
 import { withAbortSignal } from "@earendil-works/chord/context";
 import {
 	type ConversationView,
@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import type { SessionImpl } from "../src/session/session.ts";
-import { ControlledStorage, context, flush } from "./session-support.ts";
+import { ControlledStorage, context, flush, onValue } from "./session-support.ts";
 import { completed, deferred, eventually, openTasks, settled } from "./task-support.ts";
 
 type Step = { phase: "run" };
@@ -48,16 +48,19 @@ function writer(name: string, gate: Promise<void>, written: () => void) {
 	});
 }
 
+type WatchValue<T> = Extract<WatchCall<T>, { readonly kind: "value" }>;
+
 /** An observer recording each call and whether it ran inside the storage's `adopt`. */
 function recorder<T>(storage: ControlledStorage) {
-	const calls: Array<{ readonly advance: WatchChange<T>; readonly adopting: boolean } | { readonly end: unknown }> =
-		[];
+	const calls: Array<{ readonly advance: WatchValue<T>; readonly adopting: boolean } | { readonly end: unknown }> = [];
 	const observer: Observer<T> = {
-		advance: (change) => {
-			calls.push({ advance: change, adopting: storage.adopting });
+		advance: (call) => {
+			// Durable never sends a failure call.
+			if (call.kind !== "value") throw new Error("Unexpected failure call");
+			calls.push({ advance: call, adopting: storage.adopting });
 		},
-		end: (failure) => {
-			calls.push({ end: failure });
+		end: (end) => {
+			calls.push({ end });
 		},
 	};
 	return { calls, observer };
@@ -103,13 +106,13 @@ describe("observeConversation and observeTaskGraph", () => {
 		expect(viewObservation.value.conversation.id).toBe(root.id);
 		expect(graphObservation.value).toEqual({ tasks: {} });
 		const watch = await root.watch(context);
-		const watched: WatchChange<ConversationView>[] = [];
+		const watched: WatchCall<ConversationView>[] = [];
 		watch.start(async (change) => {
 			watched.push(change);
 		});
 		const entry = await root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
 		expect(view.calls).toHaveLength(1);
-		const [call] = view.calls as [{ advance: WatchChange<ConversationView>; adopting: boolean }];
+		const [call] = view.calls as [{ advance: WatchValue<ConversationView>; adopting: boolean }];
 		expect(call.adopting).toBe(true);
 		expect(call.advance.retired).toBe(false);
 		expect(call.advance.value.entries.at(-1)?.id).toBe(entry.id);
@@ -122,7 +125,7 @@ describe("observeConversation and observeTaskGraph", () => {
 		expect(view.calls).toHaveLength(1);
 		await watch.stop();
 		await harness.close(context);
-		expect(graph.calls).toEqual([{ end: undefined }]);
+		expect(graph.calls).toEqual([{ end: { kind: "ended" } }]);
 	});
 
 	it("end with the error that failed the Harness", async () => {
@@ -137,7 +140,7 @@ describe("observeConversation and observeTaskGraph", () => {
 			"disk gone",
 		);
 		await harness.closed;
-		expect(graph.calls).toEqual([{ end: { error: failure } }]);
+		expect(graph.calls).toEqual([{ end: { kind: "failed", error: failure } }]);
 	});
 
 	it("report a throwing observer, detach it and end it with the error, and keep the view going", async () => {
@@ -152,7 +155,7 @@ describe("observeConversation and observeTaskGraph", () => {
 				advance: () => {
 					throw bug;
 				},
-				end: (failure) => ends.push(failure),
+				end: (end) => ends.push(end),
 			},
 			context,
 		);
@@ -161,12 +164,12 @@ describe("observeConversation and observeTaskGraph", () => {
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context);
 		expect(reports).toEqual([bug]);
-		expect(infos).toEqual([{ type: "listener_error" }]);
-		expect(ends).toEqual([{ error: bug }]);
+		expect(infos).toEqual([{ kind: "listener_error" }]);
+		expect(ends).toEqual([{ kind: "listener_error", error: bug }]);
 		expect(healthy.calls).toHaveLength(2);
 		await harness.close(context);
 		expect(ends).toHaveLength(1);
-		expect(await harness.closed).toEqual({ reason: "closed" });
+		expect(await harness.closed).toEqual({ kind: "closed" });
 	});
 
 	it("reject, never throw, on a closed Harness", async () => {
@@ -227,6 +230,7 @@ describe("observeConversation and observeTaskGraph", () => {
 		expect(graph.calls).toEqual([
 			{
 				advance: {
+					kind: "value",
 					value: { tasks: { [key]: expect.objectContaining({ blocked: "missing_task" }) } },
 					ops: [["s", ["tasks", key], expect.objectContaining({ blocked: "missing_task" })]],
 					retired: false,
@@ -238,10 +242,10 @@ describe("observeConversation and observeTaskGraph", () => {
 		await eventually(() => graph.calls.length === 2);
 		// The registry change re-derives the reason on the line, with no commit and outside the storage's `adopt`.
 		expect(graph.calls[1]).toEqual({
-			advance: { value: expect.anything(), ops: [["d", ["tasks", key, "blocked"]]], retired: false },
+			advance: { kind: "value", value: expect.anything(), ops: [["d", ["tasks", key, "blocked"]]], retired: false },
 			adopting: false,
 		});
-		expect((graph.calls[1] as { advance: WatchChange<TaskGraph> }).advance.value.tasks[key]?.blocked).toBeUndefined();
+		expect((graph.calls[1] as { advance: WatchValue<TaskGraph> }).advance.value.tasks[key]?.blocked).toBeUndefined();
 		harness.resume();
 		await harness.waitForTask(id, context);
 		observation.detach();
@@ -283,15 +287,15 @@ describe("task documents", () => {
 		const { harness, id, finish } = await openWriter();
 		const watch = (await harness.watchDoc(Progress, id, context))!;
 		expect(watch.value).toEqual({ lines: ["started"] });
-		const changes: WatchChange<Readonly<{ lines: string[] }>>[] = [];
+		const changes: WatchCall<Readonly<{ lines: string[] }>>[] = [];
 		watch.start(async (change) => {
 			changes.push(change);
 		});
 		finish();
 		await harness.waitForTask(id, context);
-		expect(await watch.closed).toEqual({ reason: "ended" });
-		expect(changes).toEqual([{ value: { lines: ["started"] }, ops: [], retired: true }]);
-		expect(changes[0]!.value).toBe(watch.value);
+		expect(await watch.closed).toEqual({ kind: "ended" });
+		expect(changes).toEqual([{ kind: "value", value: { lines: ["started"] }, ops: [], retired: true }]);
+		expect((changes[0] as { value: unknown }).value).toBe(watch.value);
 		// The task is terminal: its address is absent for good.
 		expect(await harness.watchDoc(Progress, id, context)).toBeUndefined();
 		await harness.close(context);
@@ -303,17 +307,17 @@ describe("task documents", () => {
 		let endedAdopting: boolean | undefined;
 		const observer: Observer<Readonly<{ lines: string[] }>> = {
 			advance: progress.observer.advance,
-			end: (failure) => {
+			end: (end) => {
 				endedAdopting = storage.adopting;
-				progress.observer.end(failure);
+				progress.observer.end(end);
 			},
 		};
 		await harness.observeDoc(Progress, id, observer, context);
 		finish();
 		await harness.waitForTask(id, context);
 		expect(progress.calls).toEqual([
-			{ advance: { value: { lines: ["started"] }, ops: [], retired: true }, adopting: true },
-			{ end: undefined },
+			{ advance: { kind: "value", value: { lines: ["started"] }, ops: [], retired: true }, adopting: true },
+			{ end: { kind: "ended" } },
 		]);
 		expect(endedAdopting).toBe(true);
 		await harness.close(context);
@@ -356,7 +360,7 @@ describe("task documents", () => {
 		};
 		const { watch, harness } = await acquire();
 		// Closed at the Harness's close, the pending retirement dropped, as for every watch.
-		expect(await watch.closed).toEqual({ reason: "ended" });
+		expect(await watch.closed).toEqual({ kind: "ended" });
 		expect(() => watch.start(async () => {})).toThrow("Watch is stopped");
 		await collect();
 		expect(harness.deref()).toBeUndefined();
@@ -372,7 +376,7 @@ describe("task documents", () => {
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context)).rejects.toThrow(
 			"disk gone",
 		);
-		expect(await watch.closed).toEqual({ reason: "failed", error: failure });
+		expect(await watch.closed).toEqual({ kind: "failed", error: failure });
 	});
 
 	it("a watch busy in an earlier call when its task ends fails with the Harness before its retirement call", async () => {
@@ -381,11 +385,13 @@ describe("task documents", () => {
 		const entered = deferred();
 		const release = deferred();
 		const values: unknown[] = [];
-		watch.start(async ({ value }) => {
-			values.push(value);
-			entered.resolve();
-			await release.promise;
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				values.push(value);
+				entered.resolve();
+				await release.promise;
+			}),
+		);
 		await harness.commit(async (tx) => {
 			(await tx.doc(Progress, id)).lines.push("more");
 		}, context);
@@ -398,7 +404,7 @@ describe("task documents", () => {
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note", data: {} }), context)).rejects.toThrow(
 			"disk gone",
 		);
-		expect(await watch.closed).toEqual({ reason: "failed", error: failure });
+		expect(await watch.closed).toEqual({ kind: "failed", error: failure });
 		release.resolve();
 		await flush();
 		expect(values).toEqual([{ lines: ["started", "more"] }]);
@@ -423,7 +429,7 @@ describe("task documents", () => {
 		await flush();
 		expect(await settled(watch.closed)).toBe(false);
 		release.resolve();
-		expect(await watch.closed).toEqual({ reason: "ended" });
+		expect(await watch.closed).toEqual({ kind: "ended" });
 		expect(returned).toBe(true);
 		await harness.close(context);
 	});
@@ -433,7 +439,7 @@ describe("task documents", () => {
 		const acquire = async () => {
 			const { harness, id, finish } = await openWriter();
 			const watch = (await harness.watchDoc(Progress, id, context))!;
-			const changes: WatchChange<Readonly<{ lines: string[] }>>[] = [];
+			const changes: WatchCall<Readonly<{ lines: string[] }>>[] = [];
 			watch.start(async (change) => {
 				changes.push(change);
 			});
@@ -443,14 +449,14 @@ describe("task documents", () => {
 			await flush();
 			finish();
 			await harness.waitForTask(id, context);
-			expect(await watch.closed).toEqual({ reason: "ended" });
+			expect(await watch.closed).toEqual({ kind: "ended" });
 			await harness.close(context);
 			return { changes, harness: new WeakRef(harness) };
 		};
 		const { changes, harness } = await acquire();
 		expect(changes).toHaveLength(2);
 		for (const change of changes) {
-			expect(Object.keys(change)).toEqual(["value", "ops", "retired"]);
+			expect(Object.keys(change)).toEqual(["kind", "value", "ops", "retired"]);
 			expect(structuredClone(change)).toEqual(change);
 		}
 		await collect();

@@ -607,7 +607,7 @@ async function finalResult(
 				(agent) => toolExtension(agent, tool.name),
 				() => undefined,
 			);
-			runtime.report(new Error(broken), { type: "extension", ...optionalExtension(extension) });
+			runtime.report(new Error(broken), { kind: "extension", ...optionalExtension(extension) });
 		}
 	}
 	// Programs get the tool's own value: without a schema, its output. The model reads only `output`, so model-issued

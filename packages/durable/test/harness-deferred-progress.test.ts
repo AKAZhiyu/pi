@@ -20,7 +20,7 @@ import type { PartialMessage } from "../src/harness/partial-changes.ts";
 import type { SessionImpl } from "../src/session/session.ts";
 import { allEntries, type ChatSetup, chatSetup, openChat, textOf, waitFor } from "./chat-support.ts";
 import { addTask, addTool } from "./harness-support.ts";
-import { ControlledStorage, context, observeCommits } from "./session-support.ts";
+import { ControlledStorage, context, followCommits } from "./session-support.ts";
 import { aborted, deferred } from "./task-support.ts";
 
 /** A slow stream: 4 characters 80 times a second. */
@@ -44,11 +44,12 @@ async function open(storage: ControlledStorage, setup: ChatSetup) {
 /** The partial text of every `pi.live` revision memory adopted, the last one last. */
 function memoryPartials(harness: Harness): string[] {
 	const texts: string[] = [];
-	observeCommits(harness, (publication) => {
+	followCommits(harness, (publication) => {
 		for (const change of publication.changes) {
-			if (change.type !== "document" || change.record.kind !== LiveDoc.definition.kind) continue;
+			if (change.type !== "document" || change.kind !== "change" || change.record.kind !== LiveDoc.definition.kind)
+				continue;
 			// Publications carry untyped document values; this one is `pi.live`.
-			const message = (change.value as LiveState | null)?.generation?.message;
+			const message = (change.value as LiveState)?.generation?.message;
 			if (message !== undefined) texts.push(partialText(message) ?? "");
 		}
 	});
@@ -115,14 +116,21 @@ describe("generation partials", () => {
 		const setup = slowSetup(150);
 		setup.faux.setResponses([fauxAssistantMessage(LONG)]);
 		let opened = await open(storage, setup);
-		// A replica fed by subscribeCommits() alone, as a replication feed would be.
+		// A replica fed by observeCommits() alone, as a replication feed would be.
 		let replica = await storedLive(storage, opened.root.id);
-		opened.harness.subscribeCommits((publication) => {
-			for (const change of publication.changes) {
-				if (change.type === "document" && change.record.kind === LiveDoc.definition.kind) {
-					replica = applyImmutable(replica, change.ops);
+		opened.harness.observeCommits({
+			advance: (publication) => {
+				for (const change of publication.changes) {
+					if (
+						change.type === "document" &&
+						change.kind === "change" &&
+						change.record.kind === LiveDoc.definition.kind
+					) {
+						replica = applyImmutable(replica, change.ops);
+					}
 				}
-			}
+			},
+			end: () => {},
 		});
 		const submission = await opened.root.submit({ type: "input", content: "hi" }, context);
 		await waitFor(async () => (storedText(await storedLive(storage, opened.root.id))?.length ?? 0) > 40);

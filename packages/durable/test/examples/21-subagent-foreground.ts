@@ -115,7 +115,9 @@ const attach = async (id: ConversationId, indent: string): Promise<void> => {
 	attached.add(id);
 	const watch = await (await harness.conversation(id, context))!.watch(context);
 	let newest = watch.value.entries.at(-1)?.id ?? 0;
-	watch.start(async ({ value }) => {
+	watch.start(async (call) => {
+		if (call.kind !== "value") return;
+		const { value } = call;
 		for (const entry of value.entries) if (entry.id > newest) print(indent, entry);
 		newest = value.entries.at(-1)?.id ?? newest;
 		// A running subagent call names its child conversation in its details.

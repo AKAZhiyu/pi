@@ -30,7 +30,7 @@ import { resolveSettings } from "../src/harness/agent.ts";
 import type { SessionImpl } from "../src/session/session.ts";
 import { allEntries, type ChatSetup, chatSetup, openChat, textOf, unanswered, waitFor } from "./chat-support.ts";
 import { addSection } from "./harness-support.ts";
-import { ControlledStorage, context, observeCommits } from "./session-support.ts";
+import { ControlledStorage, context, followCommits } from "./session-support.ts";
 
 const ERROR_503 = fauxAssistantMessage([], { stopReason: "error", errorMessage: "503 Service Unavailable" });
 
@@ -75,9 +75,9 @@ function invalidFinalStream(): ReturnType<Models["streamSimple"]> {
 
 function livePublications(harness: Harness): LiveState[] {
 	const values: LiveState[] = [];
-	observeCommits(harness, (publication) => {
+	followCommits(harness, (publication) => {
 		for (const change of publication.changes) {
-			if (change.type === "document" && change.record.kind === "pi.live" && change.value !== null) {
+			if (change.type === "document" && change.record.kind === "pi.live" && change.kind === "change") {
 				values.push(change.value as LiveState);
 			}
 		}

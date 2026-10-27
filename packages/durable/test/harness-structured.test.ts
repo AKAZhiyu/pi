@@ -1393,7 +1393,7 @@ describe("tool rounds", () => {
 		reject = generation;
 		open("abort.hooked");
 		// The final commit, with the run's cleanup, fails: nothing of the cleanup lands, and the Harness fails.
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		await expect(submission.wait(context)).rejects.toMatchObject({ name: "SessionFailed", cause: failure });
 		await harness.close(context);
 		// Reopening finalizes the run; the partial becomes one aborted entry.
@@ -1668,7 +1668,7 @@ describe("conversation abort and boundaries", () => {
 		await until(async () => (await state(harness, parent)).status === "completing");
 		reject = parent;
 		open("child");
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
 		const reopened = await openNodes(storage.reopen());

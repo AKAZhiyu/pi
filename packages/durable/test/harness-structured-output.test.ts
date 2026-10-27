@@ -155,12 +155,20 @@ describe("structured output", () => {
 		const { harness, root } = await openChat(storage, setup);
 		// The result each nested call's document got, as committed.
 		const stored: JsonValue[] = [];
-		harness.subscribeCommits((publication) => {
-			for (const change of publication.changes) {
-				if (change.type !== "document" || change.record.kind !== NestedCallDoc.definition.kind) continue;
-				const result = (change.value as NestedCallState | null)?.result;
-				if (result !== undefined && change.ops.length > 0) stored.push(result as unknown as JsonValue);
-			}
+		harness.observeCommits({
+			advance: (publication) => {
+				for (const change of publication.changes) {
+					if (
+						change.type !== "document" ||
+						change.kind !== "change" ||
+						change.record.kind !== NestedCallDoc.definition.kind
+					)
+						continue;
+					const result = (change.value as NestedCallState)?.result;
+					if (result !== undefined && change.ops.length > 0) stored.push(result as unknown as JsonValue);
+				}
+			},
+			end: () => {},
 		});
 		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
 		await harness.waitForIdle(context);

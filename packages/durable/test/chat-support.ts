@@ -63,7 +63,7 @@ export async function openChat(
 				? {}
 				: { env: typeof options.env === "function" ? options.env : () => options.env as ExecutionEnv }),
 			now: () => setup.now(),
-			onReport: (error, info) => {
+			onReport: ({ error, ...info }) => {
 				setup.reports.push(error);
 				setup.infos.push(info);
 			},

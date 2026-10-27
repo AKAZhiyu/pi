@@ -15,7 +15,7 @@ import { NodeExecutionEnv } from "../src/env/node.ts";
 import { type ObservedCommit, SessionImpl } from "../src/session/session.ts";
 import { Transaction } from "../src/session/transaction.ts";
 import { JsonlStorage } from "../src/storage/jsonl/index.ts";
-import { ControlledStorage, context, createConversation, documentChanges } from "./session-support.ts";
+import { ControlledStorage, context, createConversation, documentValues } from "./session-support.ts";
 
 const CounterDoc = defineDoc<{ count: number }>({
 	checkpointWhen: () => false,
@@ -93,7 +93,7 @@ describe("Session adoption inside Storage.commit()", () => {
 		storage.fault = "reject_after_adopt";
 		await expect(bump(session)).rejects.toThrow("reclaim failed");
 		expect(discard).not.toHaveBeenCalled();
-		expect(await session.closed).toMatchObject({ reason: "failed", error: new Error("reclaim failed") });
+		expect(await session.closed).toMatchObject({ kind: "failed", error: new Error("reclaim failed") });
 	});
 
 	it("discards the staged changes when Storage rejects before adoption", async () => {
@@ -104,7 +104,7 @@ describe("Session adoption inside Storage.commit()", () => {
 		vi.spyOn(storage, "commit").mockRejectedValueOnce(new Error("disk full"));
 		await expect(bump(session)).rejects.toThrow("disk full");
 		expect(discard).toHaveBeenCalledTimes(1);
-		expect(await session.closed).toMatchObject({ reason: "failed" });
+		expect(await session.closed).toMatchObject({ kind: "failed" });
 	});
 
 	it("fails the Session with its own adoption error, which never reaches Storage", async () => {
@@ -117,25 +117,28 @@ describe("Session adoption inside Storage.commit()", () => {
 		await expect(bump(session)).rejects.toBe(failure);
 		// Storage saw a normal adoption and resolved.
 		expect(storage.order.slice(-3)).toEqual(["adopt", "adopted", "resolve"]);
-		expect(await session.closed).toEqual({ reason: "failed", error: failure });
+		expect(await session.closed).toEqual({ kind: "failed", error: failure });
 	});
 
 	it("fails the Session when Storage resolves without adopting", async () => {
 		const { storage, session } = open();
 		storage.fault = "skip_adopt";
 		await expect(bump(session)).rejects.toThrow("without adopting");
-		expect(await session.closed).toMatchObject({ reason: "failed" });
+		expect(await session.closed).toMatchObject({ kind: "failed" });
 	});
 });
 
 describe("publication at adoption", () => {
 	it("runs its own observers inside adopt and host listeners one microtask later, outside it, before Storage resolves", async () => {
 		const { storage, session } = open();
-		session.observeCommits(() => {
+		session.followCommits(() => {
 			storage.order.push(`observed adopting=${storage.adopting}`);
 		});
-		session.subscribeCommits(() => {
-			storage.order.push(`host adopting=${storage.adopting}`);
+		session.observeCommits({
+			advance: () => {
+				storage.order.push(`host adopting=${storage.adopting}`);
+			},
+			end: () => {},
 		});
 		await bump(session);
 		expect(storage.order).toEqual(["adopt", "observed adopting=true", "adopted", "host adopting=false", "resolve"]);
@@ -145,16 +148,25 @@ describe("publication at adoption", () => {
 	it("calls the host listeners registered when its dispatch runs, and none for a commit adopted without one", async () => {
 		const { storage, session } = open();
 		const calls: string[] = [];
-		const removed = session.subscribeCommits(() => {
-			calls.push("removed");
+		const removed = session.observeCommits({
+			advance: () => {
+				calls.push("removed");
+			},
+			end: () => {},
 		});
-		session.subscribeCommits(() => {
-			calls.push("kept");
+		session.observeCommits({
+			advance: () => {
+				calls.push("kept");
+			},
+			end: () => {},
 		});
 		storage.afterAdopt = () => {
-			removed();
-			session.subscribeCommits(() => {
-				calls.push("added");
+			removed.detach();
+			session.observeCommits({
+				advance: () => {
+					calls.push("added");
+				},
+				end: () => {},
 			});
 		};
 		await bump(session);
@@ -163,8 +175,11 @@ describe("publication at adoption", () => {
 		const bare = open();
 		const late: Seq[] = [];
 		bare.storage.afterAdopt = () => {
-			bare.session.subscribeCommits((publication) => {
-				late.push(publication.seq);
+			bare.session.observeCommits({
+				advance: (publication) => {
+					late.push(publication.seq);
+				},
+				end: () => {},
 			});
 		};
 		await bump(bare.session);
@@ -178,15 +193,18 @@ describe("publication at adoption", () => {
 	it("fails the Session after Storage returned for a throw of its own observers; the others and hosts got the commit", async () => {
 		const { storage, session } = open();
 		const bug = new Error("observer bug");
-		session.observeCommits(() => {
+		session.followCommits(() => {
 			storage.order.push("observed");
 			throw bug;
 		});
-		session.observeCommits(() => {
+		session.followCommits(() => {
 			storage.order.push("observed after");
 		});
-		session.subscribeCommits(() => {
-			storage.order.push(`host failed=${session.failure !== undefined}`);
+		session.observeCommits({
+			advance: () => {
+				storage.order.push(`host failed=${session.failure !== undefined}`);
+			},
+			end: () => {},
 		});
 		session.subscribeClose(() => {
 			storage.order.push("close");
@@ -202,7 +220,7 @@ describe("publication at adoption", () => {
 			"resolve",
 			"close",
 		]);
-		expect(await session.closed).toEqual({ reason: "failed", error: bug });
+		expect(await session.closed).toEqual({ kind: "failed", error: bug });
 		const reopened = new SessionImpl(storage.reopen());
 		expect(await reopened.snapshot(CounterDoc, context)).toEqual({ count: 1 });
 		await reopened.close(context);
@@ -212,19 +230,22 @@ describe("publication at adoption", () => {
 		const { storage, session } = open();
 		await bump(session);
 		const stored: Seq[] = [];
-		session.observeCommits(() => {
+		session.followCommits(() => {
 			storage.order.push("observed");
 		});
-		session.subscribeCommits((publication) => {
-			storage.order.push("host");
-			stored.push(publication.seq);
+		session.observeCommits({
+			advance: (publication) => {
+				storage.order.push("host");
+				stored.push(publication.seq);
+			},
+			end: () => {},
 		});
 		storage.order.length = 0;
 		storage.fault = "reject_after_adopt";
 		await expect(bump(session)).rejects.toThrow("reclaim failed");
 		expect(storage.order).toEqual(["adopt", "observed", "adopted", "host", "resolve"]);
 		expect(stored).toHaveLength(1);
-		expect(await session.closed).toMatchObject({ reason: "failed" });
+		expect(await session.closed).toMatchObject({ kind: "failed" });
 		const reopened = new SessionImpl(storage.reopen());
 		expect(await reopened.snapshot(CounterDoc, context)).toEqual({ count: 2 });
 		await reopened.close(context);
@@ -238,13 +259,16 @@ describe("publication at adoption", () => {
 		}, context);
 		const observed: ObservedCommit[] = [];
 		const stored: CommitPublication[] = [];
-		session.observeCommits((publication) => {
+		session.followCommits((publication) => {
 			storage.order.push("observed");
 			observed.push(publication);
 		});
-		session.subscribeCommits((publication) => {
-			storage.order.push("host");
-			stored.push(publication);
+		session.observeCommits({
+			advance: (publication) => {
+				storage.order.push("host");
+				stored.push(publication);
+			},
+			end: () => {},
 		});
 		storage.order.length = 0;
 		await session.commit(
@@ -260,9 +284,9 @@ describe("publication at adoption", () => {
 			(await tx.doc(NoteDoc, conversationId)).b = 2;
 		}, context);
 		expect(storage.order).toEqual(["observed", "adopt", "observed", "adopted", "host", "resolve"]);
-		expect(documentChanges(observed[1]!).map((change) => change.ops)).toEqual([[["s", ["b"], 2]]]);
+		expect(documentValues(observed[1]!).map((change) => change.ops)).toEqual([[["s", ["b"], 2]]]);
 		expect(stored).toHaveLength(1);
-		expect(documentChanges(stored[0]!).map((change) => change.ops)).toEqual([
+		expect(documentValues(stored[0]!).map((change) => change.ops)).toEqual([
 			[
 				["s", ["a"], 1],
 				["s", ["b"], 2],
@@ -278,8 +302,11 @@ describe("publication at adoption", () => {
 		await session.commit(async (tx) => {
 			await tx.doc(NoteDoc, conversationId);
 		}, context);
-		session.subscribeCommits(() => {
-			storage.order.push(`host adopting=${storage.adopting}`);
+		session.observeCommits({
+			advance: () => {
+				storage.order.push(`host adopting=${storage.adopting}`);
+			},
+			end: () => {},
 		});
 		await session.commit(
 			async (tx) => {
@@ -325,8 +352,11 @@ describe("publication at adoption", () => {
 			}, context);
 		try {
 			await count();
-			session.subscribeCommits(() => {
-				env.order.push("host");
+			session.observeCommits({
+				advance: () => {
+					env.order.push("host");
+				},
+				end: () => {},
 			});
 			await count();
 			env.order.push("resolved");
@@ -344,8 +374,11 @@ describe("publication at adoption", () => {
 			await tx.doc(NoteDoc, conversationId);
 		}, context);
 		const stored: (readonly unknown[])[] = [];
-		session.subscribeCommits((publication) => {
-			stored.push(documentChanges(publication).map((change) => change.ops));
+		session.observeCommits({
+			advance: (publication) => {
+				stored.push(documentValues(publication).map((change) => change.ops));
+			},
+			end: () => {},
 		});
 		await session.commit(
 			async (tx) => {
@@ -359,6 +392,6 @@ describe("publication at adoption", () => {
 		await expect(session.unloadDocuments()).rejects.toThrow("reclaim failed");
 		expect(storage.order).toEqual(["adopt", "adopted", "resolve"]);
 		expect(stored).toEqual([[[["s", ["a"], 1]]]]);
-		expect(await session.closed).toMatchObject({ reason: "failed", error: new Error("reclaim failed") });
+		expect(await session.closed).toMatchObject({ kind: "failed", error: new Error("reclaim failed") });
 	});
 });

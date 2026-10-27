@@ -840,7 +840,7 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 			const watcher = await RemoteWatcher.open(this.connection, resolved, onChange, this.#watchOptions);
 			const afterOpen = abortResult<FileWatcher>(context.abortSignal);
 			if (afterOpen) {
-				await watcher.close(context);
+				await watcher.stop(context);
 				return afterOpen;
 			}
 			return ok(watcher);

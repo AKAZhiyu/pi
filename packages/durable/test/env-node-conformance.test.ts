@@ -78,11 +78,11 @@ describe("NodeExecutionEnv watch limits", () => {
 			);
 			getOrThrow(await env.createDir("tree/d", undefined, context));
 			const deadline = Date.now() + 3000;
-			while (!changes.some((change) => "error" in change) && Date.now() < deadline) {
+			while (!changes.some((change) => change.kind === "failed") && Date.now() < deadline) {
 				await new Promise((resolve) => setTimeout(resolve, 20));
 			}
-			expect(changes.at(-1)).toMatchObject({ error: { code: "invalid" } });
-			await watcher.close(context);
+			expect(changes.at(-1)).toMatchObject({ kind: "failed", error: { code: "invalid" } });
+			await watcher.stop(context);
 		} finally {
 			await removeTempDir(cwd);
 		}

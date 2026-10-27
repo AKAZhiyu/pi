@@ -26,7 +26,7 @@ import { describe, expect, it } from "vitest";
 import { type ChatSetup, chatSetup, openChat, textOf, waitFor } from "./chat-support.ts";
 import { addTool } from "./harness-support.ts";
 import { slotsOf, viewHistory } from "./live-support.ts";
-import { context, documentChanges, observeCommits } from "./session-support.ts";
+import { context, documentValues, followCommits, onValue } from "./session-support.ts";
 import { aborted, deferred } from "./task-support.ts";
 
 type Frame = { value: ConversationView; ops: readonly Op[] };
@@ -40,13 +40,15 @@ async function listen(conversation: Conversation, check = true) {
 	const frames: Frame[] = [];
 	let replayed = watch.value;
 	let mismatches = 0;
-	watch.start(async ({ value, ops }) => {
-		if (check) {
-			replayed = applyImmutable(replayed, ops);
-			if (JSON.stringify(replayed) !== JSON.stringify(value)) mismatches++;
-		}
-		frames.push({ value, ops });
-	});
+	watch.start(
+		onValue(async ({ value, ops }) => {
+			if (check) {
+				replayed = applyImmutable(replayed, ops);
+				if (JSON.stringify(replayed) !== JSON.stringify(value)) mismatches++;
+			}
+			frames.push({ value, ops });
+		}),
+	);
 	return { watch, frames, mismatches: () => mismatches };
 }
 
@@ -63,9 +65,9 @@ function slow(): ChatSetup {
 /** Committed partials of the Harness's generations, one per commit that has one. */
 function partialsOf(harness: Harness): AssistantMessage[] {
 	const partials: AssistantMessage[] = [];
-	observeCommits(harness, (publication) => {
-		for (const change of documentChanges(publication)) {
-			const message = (change.value as LiveState | null)?.generation?.message as AssistantMessage | undefined;
+	followCommits(harness, (publication) => {
+		for (const change of documentValues(publication)) {
+			const message = (change.value as LiveState)?.generation?.message as AssistantMessage | undefined;
 			if (change.record.kind === "pi.live" && message !== undefined) partials.push(message);
 		}
 	});
@@ -214,9 +216,10 @@ describe("a run as the conversation view shows it", () => {
 		const observation = await harness.observeConversation(
 			root.id,
 			{
-				advance: (change) => {
-					views.push(change.value);
-					ops.push([...change.ops]);
+				advance: (call) => {
+					if (call.kind !== "value") return;
+					views.push(call.value);
+					ops.push([...call.ops]);
 				},
 				end: () => {},
 			},
@@ -269,9 +272,9 @@ describe("a run as the conversation view shows it", () => {
 		]);
 		const { harness, root } = await openChat(new MemoryStorage(), setup);
 		const outputs: string[] = [];
-		observeCommits(harness, (publication) => {
-			for (const change of documentChanges(publication)) {
-				const output = (change.value as LiveState | null)?.tools?.[0]?.output;
+		followCommits(harness, (publication) => {
+			for (const change of documentValues(publication)) {
+				const output = (change.value as LiveState)?.tools?.[0]?.output;
 				if (change.record.kind === "pi.live" && output !== undefined && output !== outputs.at(-1)) {
 					outputs.push(output);
 				}
@@ -441,9 +444,11 @@ describe("a run as the conversation view shows it", () => {
 			await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		}
 		const frames: Frame[] = [];
-		watch.start(async ({ value, ops }) => {
-			frames.push({ value, ops });
-		});
+		watch.start(
+			onValue(async ({ value, ops }) => {
+				frames.push({ value, ops });
+			}),
+		);
 		await drained();
 		expect(frames[0]!.ops).toEqual([["r", frames[0]!.value]]);
 		await change((live) => {
@@ -503,7 +508,7 @@ describe("streamed partials", () => {
 		const ops: Op[] = [];
 		const observation = await harness.observeConversation(
 			root.id,
-			{ advance: (change) => ops.push(...change.ops), end: () => {} },
+			{ advance: (call) => call.kind === "value" && ops.push(...call.ops), end: () => {} },
 			context,
 		);
 		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
@@ -552,7 +557,7 @@ describe("streamed partials", () => {
 			]);
 			const { harness, root } = await openChat(new MemoryStorage(), setup);
 			let commits = 0;
-			observeCommits(harness, () => commits++);
+			followCommits(harness, () => commits++);
 			const bytes = await allocatedBytes(async () => {
 				await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
 			});

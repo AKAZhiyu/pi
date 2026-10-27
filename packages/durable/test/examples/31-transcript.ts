@@ -64,7 +64,9 @@ const window = { min: 10, max: 20 };
 let watch = await root.watch(context, window);
 let view = transcript.merge(watch.value);
 render("attach", view);
-watch.start(async ({ value }) => {
+watch.start(async (call) => {
+	if (call.kind !== "value") return;
+	const { value } = call;
 	view = transcript.merge(value);
 });
 
@@ -84,7 +86,9 @@ await chat(40);
 watch = await root.watch(context, { ...window, ...transcript.resume });
 view = transcript.merge(watch.value);
 render("resume after 40 missed", view);
-watch.start(async ({ value }) => {
+watch.start(async (call) => {
+	if (call.kind !== "value") return;
+	const { value } = call;
 	view = transcript.merge(value);
 });
 

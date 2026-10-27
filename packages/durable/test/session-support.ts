@@ -19,6 +19,19 @@ import { type ObservedCommit, SessionImpl } from "../src/session/session.ts";
 
 export const context: Context = BACKGROUND_CONTEXT;
 
+/**
+ * A watch listener for value calls: Durable's watches never send a `failed` call (their failures end them), so one here
+ * throws, which ends the watch `listener_error`.
+ */
+export function onValue<C extends { readonly kind: string }>(
+	listener: (call: Extract<C, { readonly kind: "value" }>, context: Context) => Promise<void>,
+): (call: C, context: Context) => Promise<void> {
+	return (call, deliveryContext) => {
+		if (call.kind !== "value") throw new Error(`Unexpected ${call.kind} watch call`);
+		return listener(call as Extract<C, { readonly kind: "value" }>, deliveryContext);
+	};
+}
+
 type Deferred = { readonly promise: Promise<void>; readonly resolve: () => void };
 
 function deferred(): Deferred {
@@ -182,8 +195,11 @@ export function openTestSession(): {
 	// These tests pin the cache's identities and loads, so documents stay as long as the default keeps them.
 	const session = new SessionImpl(storage, Date.now, () => 600_000);
 	const publications: CommitPublication[] = [];
-	session.subscribeCommits((publication) => {
-		publications.push(publication);
+	session.observeCommits({
+		advance: (publication) => {
+			publications.push(publication);
+		},
+		end: () => {},
 	});
 	return { storage, session, publications };
 }
@@ -197,15 +213,25 @@ export function documentChanges(publication: {
 }
 
 /**
- * Observe every commit as memory adopts it, deferred ones before they are stored, as views and document watches do;
- * `subscribeCommits()` sees only what was stored.
+ * Follow every commit as memory adopts it, deferred ones before they are stored, as views and document watches do;
+ * `observeCommits()` sees only what was stored.
  */
-export function observeCommits(
+export function followCommits(
 	session: Session,
 	listener: (publication: ObservedCommit, context: Context) => void,
 ): () => void {
-	// `observeCommits()` is internal, so the public type lacks it; every Session and Harness is a `SessionImpl`.
-	return (session as unknown as SessionImpl).observeCommits(listener);
+	// `followCommits()` is internal, so the public type lacks it; every Session and Harness is a `SessionImpl`.
+	return (session as unknown as SessionImpl).followCommits(listener);
+}
+
+/** The document changes of `publication` that carry a value: creations and updates, no retirements. */
+export function documentValues(publication: {
+	readonly changes: readonly CommitChange[];
+}): readonly Extract<DocumentCommitChange, { readonly kind: "change" }>[] {
+	return publication.changes.filter(
+		(change): change is Extract<DocumentCommitChange, { readonly kind: "change" }> =>
+			change.type === "document" && change.kind === "change",
+	);
 }
 
 export function documentCopyChanges(

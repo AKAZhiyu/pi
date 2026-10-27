@@ -380,7 +380,7 @@ export class TaskScheduler {
 	 * `running` task stays as committed, running in another process.
 	 */
 	async open(context: Context): Promise<void> {
-		this.#session.observeCommits((publication) => this.#observe(publication));
+		this.#session.followCommits((publication) => this.#observe(publication));
 		this.#session.subscribeClose(() => this.#seal());
 		this.#unsubscribeRegistry = this.#registry.subscribe(() => {
 			this.#notifyBlocked();
@@ -1407,7 +1407,7 @@ export class TaskScheduler {
 			try {
 				listener();
 			} catch (error) {
-				this.#report(error, { type: "listener_error" });
+				this.#report(error, { kind: "listener_error" });
 			}
 		}
 	}
@@ -1545,7 +1545,7 @@ export class TaskScheduler {
 		}
 		for (const { record, message } of faulted) {
 			this.#report(new Error(message), {
-				type: "task_faulted",
+				kind: "task_faulted",
 				...this.#aboutTask(recordTask(record)),
 				reason: "restart_limit",
 			});
@@ -1586,7 +1586,7 @@ export class TaskScheduler {
 			queueMicrotask(() => this.#notifyBlocked());
 			this.#scheduleWake();
 			const extension = installerOf(snapshot, fit.task);
-			this.#report(error, { type: "migration_failed", ...this.#aboutTask({ ...recordTask(record), extension }) });
+			this.#report(error, { kind: "migration_failed", ...this.#aboutTask({ ...recordTask(record), extension }) });
 			return { kind: "blocked", reason: "migration_failed" };
 		}
 	}
@@ -1644,7 +1644,7 @@ export class TaskScheduler {
 		if (fit.migrates && fit.task.definition.migrate === undefined) {
 			return { kind: "blocked", reason: "migration_failed", error: missingMigration(record, erased(fit.task)) };
 		}
-		return { kind: "ready", migrates: fit.migrates };
+		return { kind: "pending", migrates: fit.migrates };
 	}
 
 	#createInvocation(record: RunnableTaskRecord, mode: "run" | "abort", extension: string | undefined): Invocation {
@@ -1677,7 +1677,7 @@ export class TaskScheduler {
 				if (invocation.mode === "run") await this.#run(reservation);
 				else await this.#runAbort(reservation);
 			} catch (error) {
-				this.#report(error, { type: "task_error", ...this.#aboutTask(invocation) }, invocation.context);
+				this.#report(error, { kind: "task_error", ...this.#aboutTask(invocation) }, invocation.context);
 			} finally {
 				this.#end(invocation);
 				invocation.record = undefined;
@@ -1825,9 +1825,9 @@ export class TaskScheduler {
 				this.#report(
 					new Error(`Task ${current.id} keeps running under its old ${current.kind} definition`),
 					{
-						type: "task_outdated",
+						kind: "task_outdated",
 						...this.#aboutTask({ ...recordTask(current), extension }),
-						reason: next === undefined ? "missing_task" : "incompatible_task",
+						reason: outdatedReason(next, current),
 					},
 					context,
 				);
@@ -1889,7 +1889,7 @@ export class TaskScheduler {
 			if (fault !== undefined)
 				this.#report(
 					fault.error,
-					{ type: "task_faulted", ...this.#aboutTask(invocation), reason: "threw" },
+					{ kind: "task_faulted", ...this.#aboutTask(invocation), reason: "threw" },
 					invocation.context,
 				);
 			return continued;
@@ -2086,7 +2086,7 @@ export class TaskScheduler {
 						if (invocation.controller.signal.aborted) throw error;
 						this.#report(
 							error,
-							{ type: "extension_error", extension, task: reportTask(invocation) },
+							{ kind: "extension_error", extension, task: reportTask(invocation) },
 							invocation.context,
 						);
 					}
@@ -2137,7 +2137,7 @@ export class TaskScheduler {
 					this.#report(
 						new Error(interrupted.error.message),
 						{
-							type: "task_interrupted",
+							kind: "task_interrupted",
 							...this.#aboutTask(invocation),
 							reason: interruptionOf(interrupted.error)!,
 							restarts: interrupted.restarts,
@@ -2309,10 +2309,10 @@ export class TaskScheduler {
 				this.#report(
 					error,
 					from === undefined
-						? { type: "task_error", ...this.#aboutTask(invocation) }
-						: from.type === "extension"
-							? { type: "extension_error", task, ...optionalExtension(from.extension) }
-							: { type: "host_error", callback: from.callback, task },
+						? { kind: "task_error", ...this.#aboutTask(invocation) }
+						: from.kind === "extension"
+							? { kind: "extension_error", task, ...optionalExtension(from.extension) }
+							: { kind: "host_error", callback: from.callback, task },
 					invocation.context,
 				);
 			},
@@ -2366,10 +2366,10 @@ export class TaskScheduler {
 	}
 }
 
-const REGISTRY: ReportInfo = { type: "host_error", callback: "registry" };
-const SETTINGS: ReportInfo = { type: "host_error", callback: "settings" };
-const ON_WAKE: ReportInfo = { type: "host_error", callback: "onWake" };
-const TELEMETRY: ReportInfo = { type: "host_error", callback: "telemetry" };
+const REGISTRY: ReportInfo = { kind: "host_error", callback: "registry" };
+const SETTINGS: ReportInfo = { kind: "host_error", callback: "settings" };
+const ON_WAKE: ReportInfo = { kind: "host_error", callback: "onWake" };
+const TELEMETRY: ReportInfo = { kind: "host_error", callback: "telemetry" };
 
 /** The extension that installed `task` in `snapshot`, the last one that lists it; none for a built-in task. */
 function installerOf(snapshot: RegistrySnapshot, task: AnyTask | undefined): string | undefined {
@@ -2490,6 +2490,15 @@ function withState(record: AnyTaskRecord, state: TaskState<JsonValue, JsonValue>
 }
 
 /** Whether a definition can take the task at reservation: same version, or newer with a migration. */
+/**
+ * Why a replacement definition cannot take a running task, in `#fit()`'s words: none is registered, it is older than
+ * the task, or it is newer without a `migrate`.
+ */
+function outdatedReason(task: AnyTask | undefined, record: AnyTaskRecord): BlockedReason {
+	if (task === undefined) return "missing_task";
+	return task.definition.version < record.version ? "task_too_old" : "migration_failed";
+}
+
 function canReserve(task: AnyTask, record: AnyTaskRecord): boolean {
 	const definition = task.definition;
 	return (

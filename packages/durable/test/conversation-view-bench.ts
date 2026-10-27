@@ -20,15 +20,7 @@ import { promisify } from "node:util";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import {
-	type Conversation,
-	type ConversationView,
-	createRegistry,
-	type EntryId,
-	Harness,
-	LiveDoc,
-	type Storage,
-} from "../src/index.ts";
+import { type Conversation, createRegistry, type EntryId, Harness, LiveDoc, type Storage } from "../src/index.ts";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
 
 type Scenario =
@@ -179,7 +171,7 @@ async function run(scenario: Scenario): Promise<Record<string, number>> {
 				await root.commit(async (tx) => {
 					(await tx.doc(LiveDoc, root.id)).compactionFailure = {
 						taskId: 1 as never,
-						reason: "manual",
+						trigger: "manual",
 						error: `${index}`,
 					};
 				}, context);
@@ -198,8 +190,9 @@ async function run(scenario: Scenario): Promise<Record<string, number>> {
 		} else {
 			const watch = await root.watch(context);
 			let first: WeakRef<object> | undefined;
-			watch.start(async ({ value }: { value: ConversationView }) => {
-				const entry = value.entries.at(-1);
+			watch.start(async (call) => {
+				if (call.kind !== "value") return;
+				const entry = call.value.entries.at(-1);
 				if (first === undefined && entry !== undefined) first = new WeakRef(entry);
 			});
 			await appendEntries(root, 1, 1);

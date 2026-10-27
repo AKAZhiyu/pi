@@ -18,7 +18,7 @@ import { SessionImpl, setDefaultDocumentRetention } from "../src/session/session
 import { chatSetup, openChat } from "./chat-support.ts";
 import { addTool } from "./harness-support.ts";
 import { viewHistory } from "./live-support.ts";
-import { ControlledStorage, context, createConversation } from "./session-support.ts";
+import { ControlledStorage, context, createConversation, onValue } from "./session-support.ts";
 import { deferred, eventually } from "./task-support.ts";
 
 type Counter = { count: number };
@@ -155,9 +155,11 @@ describe("document cache retention", () => {
 		const kept = (await session.watchDoc(CounterDoc, conversationId, context))!;
 		kept.start(async () => {});
 		const seen: number[] = [];
-		watch.start(async ({ value }) => {
-			seen.push(value.count);
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				seen.push(value.count);
+			}),
+		);
 		clock.now += 1_000_000;
 		await bump(session, conversationId);
 		await settleLine(session);

@@ -37,6 +37,7 @@ import {
 import { expect, expectTypeOf, it } from "vitest";
 import type { ExecutionEnv } from "../src/env/index.ts";
 import { CodingTools, createBashTool, createEditTool, createReadTool } from "../src/tools/index.ts";
+import { onValue } from "./session-support.ts";
 
 // ─── Names the spec leaves to the application ────────────────────────────────
 
@@ -363,7 +364,7 @@ function examples() {
 			);
 			const watch = await conversation.watch(context);
 			render(transcript.merge(watch.value));
-			watch.start(async ({ value }) => render(transcript.merge(value)));
+			watch.start(onValue(async ({ value }) => render(transcript.merge(value))));
 			// A marker scrolled into view:
 			render(await transcript.loadEarlier(context));
 			// Reconnect after a drop:

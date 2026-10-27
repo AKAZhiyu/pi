@@ -22,7 +22,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
 import { allEntries, chatSetup, openChat, waitFor } from "./chat-support.ts";
-import { context } from "./session-support.ts";
+import { context, onValue } from "./session-support.ts";
 import { aborted, deferred } from "./task-support.ts";
 
 type Frame = { value: ConversationView; ops: readonly Op[] };
@@ -34,9 +34,11 @@ async function record(conversation: Conversation, window?: ConversationWindow) {
 	const watch = await conversation.watch(context, window);
 	const initial = watch.value;
 	const frames: Frame[] = [];
-	watch.start(async ({ value, ops }) => {
-		frames.push({ value, ops });
-	});
+	watch.start(
+		onValue(async ({ value, ops }) => {
+			frames.push({ value, ops });
+		}),
+	);
 	return { initial, frames, stop: () => watch.stop() };
 }
 
@@ -89,16 +91,20 @@ async function drained(): Promise<void> {
 
 function touches(harness: Harness, conversation: Conversation): { count: number } {
 	const counter = { count: 0 };
-	harness.subscribeCommits((publication) => {
-		const touched = publication.changes.some(
-			(change) =>
-				(change.type === "entry" && change.value.conversationId === conversation.id) ||
-				(change.type === "document" &&
-					change.conversationId === conversation.id &&
-					MOUNTED.includes(change.record.kind) &&
-					change.ops.length > 0),
-		);
-		if (touched) counter.count++;
+	harness.observeCommits({
+		advance: (publication) => {
+			const touched = publication.changes.some(
+				(change) =>
+					(change.type === "entry" && change.value.conversationId === conversation.id) ||
+					(change.type === "document" &&
+						change.kind === "change" &&
+						change.conversationId === conversation.id &&
+						MOUNTED.includes(change.record.kind) &&
+						change.ops.length > 0),
+			);
+			if (touched) counter.count++;
+		},
+		end: () => {},
 	});
 	return counter;
 }
@@ -249,9 +255,11 @@ describe("conversation view", () => {
 			await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		}
 		const frames: Frame[] = [];
-		watch.start(async ({ value, ops }) => {
-			frames.push({ value, ops });
-		});
+		watch.start(
+			onValue(async ({ value, ops }) => {
+				frames.push({ value, ops });
+			}),
+		);
 		await drained();
 		expect(frames).toHaveLength(1);
 		expect(frames[0]!.ops[0]?.[0]).not.toBe("r");
@@ -287,7 +295,7 @@ describe("conversation view", () => {
 		const { harness, root } = await openChat(new MemoryStorage(), chatSetup());
 		const watch = await root.watch(context);
 		await harness.close(context);
-		expect(await watch.closed).toEqual({ reason: "ended" });
+		expect(await watch.closed).toEqual({ kind: "ended" });
 		expect(watch.value.entries).toEqual([]);
 		await expect(root.watch(context)).rejects.toThrow();
 	});
@@ -333,7 +341,7 @@ describe("conversation view", () => {
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "one" }), context);
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "two" }), context);
 		await drained();
-		expect(await failing.closed).toMatchObject({ reason: "listener_error" });
+		expect(await failing.closed).toMatchObject({ kind: "listener_error" });
 		expect(frames).toHaveLength(2);
 		await stop();
 		await harness.close(context);
@@ -519,7 +527,7 @@ describe("conversation view window", () => {
 		const changes: ConversationView[] = [];
 		const observation = await harness.observeConversation(
 			root.id,
-			{ advance: ({ value }) => changes.push(value), end: () => {} },
+			{ advance: (call) => call.kind === "value" && changes.push(call.value), end: () => {} },
 			context,
 			{ min: 2, max: 3 },
 		);
@@ -545,9 +553,11 @@ describe("conversation view window", () => {
 			await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		}
 		const frames: Frame[] = [];
-		watch.start(async ({ value, ops }) => {
-			frames.push({ value, ops });
-		});
+		watch.start(
+			onValue(async ({ value, ops }) => {
+				frames.push({ value, ops });
+			}),
+		);
 		await drained();
 		expect(frames).toHaveLength(1);
 		expect(frames[0]!.ops).toEqual([["r", frames[0]!.value]]);
@@ -564,10 +574,12 @@ describe("conversation view window", () => {
 		const watch = await root.watch(context, { min: 5, max: 10 });
 		let first: WeakRef<EntryRecord> | undefined;
 		let count = 0;
-		watch.start(async ({ value }) => {
-			count = value.entries.length;
-			if (first === undefined && value.entries[0] !== undefined) first = new WeakRef(value.entries[0]);
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				count = value.entries.length;
+				if (first === undefined && value.entries[0] !== undefined) first = new WeakRef(value.entries[0]);
+			}),
+		);
 		await notes(root, 1);
 		await waitFor(() => first !== undefined);
 		await notes(root, 200);

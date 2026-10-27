@@ -959,7 +959,7 @@ describe("ownership", () => {
 		// The failed cascade commit fails the Harness. `closed` settles once its invocations have ended, and the owner's
 		// abort handler ignores its signal: let it return.
 		open("abort.owner", "completed");
-		expect(await opened.harness.closed).toMatchObject({ reason: "failed" });
+		expect(await opened.harness.closed).toMatchObject({ kind: "failed" });
 		await opened.harness.close(context);
 		// Reopening derives the mark again.
 		opened = await openHarness(await openNodeSqliteStorage(path));
@@ -991,7 +991,7 @@ describe("ownership", () => {
 		const tree = await ownedChild(root, "owner");
 		failMark = tree.inner;
 		open("owner", "failed");
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
 		const reopened = await openHarness(storage.reopen());

@@ -1,8 +1,22 @@
-import { type Context, type JsonValue, Watch, type WatchChange, type WatchHandle } from "@earendil-works/chord";
+import {
+	type Context,
+	type JsonValue,
+	Watch,
+	type WatchCall,
+	type WatchEnd,
+	type WatchHandle,
+} from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { applyImmutable, type NonEmptyPath, type Op, type Path } from "@earendil-works/chord/delta";
 import { idFromNumber } from "../ids.ts";
-import { contained, guardObserver, type ObservedCommit, observation, type SessionImpl } from "../session/session.ts";
+import {
+	contained,
+	ENDED,
+	guardObserver,
+	type ObservedCommit,
+	observation,
+	type SessionImpl,
+} from "../session/session.ts";
 import type {
 	ConversationDocToken,
 	ConversationId,
@@ -61,9 +75,9 @@ const DEFAULT_WINDOW_MIN = 50;
 
 /** Receives each next revision of one observer's window, and the Session's close. */
 export type ViewObserver = {
-	advance(change: WatchChange<ConversationView>, context: Context): void;
-	/** The Session closed, or failed with `failure`. */
-	end(failure: { readonly error: unknown } | undefined): void;
+	advance(call: WatchCall<ConversationView>, context: Context): void;
+	/** The Session closed (`ended`), or failed (`failed`). */
+	end(end: WatchEnd): void;
 };
 
 const MOUNTED = [
@@ -138,16 +152,18 @@ export class ConversationViews {
 		this.#session = session;
 		this.#storage = storage;
 		VIEWS.set(session, this);
-		session.observeCommits((publication, context) => {
+		session.followCommits((publication, context) => {
 			for (const [id, mount] of this.#mounts)
 				advance(id, mount, publication, context, (error) => this.report(error));
 		});
 		session.subscribeClose(() => {
 			this.#closed = true;
+			const failure = this.#session.failure;
+			const end: WatchEnd = failure === undefined ? ENDED : { kind: "failed", error: failure.error };
 			for (const mount of this.#mounts.values())
 				for (const windowed of [...mount.observers]) {
 					contained(
-						() => windowed.observer.end(this.#session.failure),
+						() => windowed.observer.end(end),
 						(error) => this.report(error),
 					);
 				}
@@ -188,7 +204,7 @@ export class ConversationViews {
 		return observation(value, attached.observer);
 	}
 
-	/** A serialized watch of the view, an observer of its mount; cancelling `context` stops it. */
+	/** A serialized watch of the view, an observer of its mount; aborting `context` ends it `aborted`. */
 	async watch(
 		id: ConversationId,
 		context: Context,
@@ -202,10 +218,10 @@ export class ConversationViews {
 		);
 		const signal = context.abortSignal;
 		if (signal?.aborted) {
-			observer.cancel();
+			observer.abort();
 			throw signal.reason;
 		}
-		if (signal !== undefined) observer.observeCancellation(signal);
+		if (signal !== undefined) observer.observeAbort(signal);
 		return observer;
 	}
 
@@ -326,14 +342,14 @@ function advance(
 		if (!MOUNTED_KINDS.has(kind) || change.record.key !== undefined) continue;
 		const path: NonEmptyPath = ["docs", kind];
 		const mounted = mount.incarnations.get(kind);
-		if (change.value === null) {
+		if (change.kind === "retire") {
 			if (mounted?.id !== change.record.id) continue;
 			mount.incarnations.delete(kind);
 			docOps.push(["d", path]);
 		} else if (mounted?.id === change.record.id && mounted.version === change.version) {
 			for (const op of change.ops) docOps.push(prefixed(op, path));
 		} else {
-			mount.incarnations.set(kind, { id: change.record.id, version: change.version! });
+			mount.incarnations.set(kind, { id: change.record.id, version: change.version });
 			docOps.push(["s", path, change.value]);
 		}
 	}
@@ -357,8 +373,8 @@ function advance(
 			}
 		}
 		windowed.value = view(mount.conversation, entries, before, mount.docs);
-		const change: WatchChange<ConversationView> = { value: windowed.value, ops, retired: false };
-		contained(() => windowed.observer.advance(change, frameContext), report);
+		const call: WatchCall<ConversationView> = { kind: "value", value: windowed.value, ops, retired: false };
+		contained(() => windowed.observer.advance(call, frameContext), report);
 	}
 }
 

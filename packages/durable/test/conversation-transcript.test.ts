@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { allEntries, chatSetup, openChat } from "./chat-support.ts";
-import { context } from "./session-support.ts";
+import { context, onValue } from "./session-support.ts";
 import { deferred } from "./task-support.ts";
 
 const CONVERSATION = { id: 1 } as unknown as ConversationView["conversation"];
@@ -326,9 +326,11 @@ describe("ConversationTranscript over a Harness", () => {
 		const window = { min: 10, max: 20 };
 		const watch = await root.watch(context, window);
 		let view = helper.merge(watch.value);
-		watch.start(async ({ value }) => {
-			view = helper.merge(value);
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				view = helper.merge(value);
+			}),
+		);
 		for (let index = 0; index < 15; index++) await note();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(view.items.some((item) => item.kind === "gap")).toBe(false);
