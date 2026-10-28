@@ -168,13 +168,14 @@ object's first activation the records are loaded through the engine's key listin
   "restart" }` and finishes.
 - **Restart limit** (aligned with Durable's `restarts`):
 
-> **Decision needed (D6).** Durable counts how many times in a row a crash cut a task off without the task changing
-> its state since: open counts, a close does not, and at `restartLimit` the task ends visibly. Proposal for Chord:
-> the same rule: at activation each run recorded `running` gets `restarts + 1` stored; a `ctx.state.change` resets it
-> to 0 (progress); at 5 the run ends `failed { aborted, reason: "restart" }` with a `job_failed` report naming the
-> limit (no `blocked { restart_limit }`: Durable dropped parking in #11139, and a blocked run would need a retry API);
-> a clean close (`host.close`, a reload's native restart) records nothing: those runs end `aborted` (`stop`/`reload`)
-> and do not resume. (Supersedes design §15's "then `blocked { restart_limit }`".)
+**The same rule as Durable (D6, owner, 2026-10-27: "yes, same rule for chord"):** at activation a run recorded
+`running` was cut off by a crash: its `restarts` rises by one (stored), then it resumes (`rerun` invokes `run` again,
+`abandon` finishes with `failed { aborted, reason: "restart" }`); a clean close (`host.close`, a native restart on
+reload) writes its stopped runs back so the next activation counts nothing (Durable's `writeAtClose`); a
+`ctx.state.change` resets the count (progress); at five in a row the run ends with a new `JobError` `{ kind:
+"restart_limit", restarts }`, its `finish` runs, and `job_interrupted` is reported (Durable's `restart_limit`,
+`task_interrupted`). No `blocked { restart_limit }`: supersedes design §15's parking, as Durable dropped parking in
+#11139.
 
 - **Abort** (owner, 2026-10-27: async and stored in 6b):
 

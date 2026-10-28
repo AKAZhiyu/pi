@@ -1669,6 +1669,12 @@ validation and copies the v2 kernel added around Delta.
   one on the same store is refused (`invalid/args`), as one host per store (rule 7). Rejected on the way: a table per
   job, a store-wide runs table, `$`-marked internal names (owner: "if our abstractions can't cleanly support this
   without $ magic, it's a bad abstraction").
+- **Slice 6b D6: persisted jobs restart as Durable's tasks (owner, 2026-10-27: "yes, same rule for chord"):** at
+  activation a run recorded `running` gets `restarts + 1` (stored) and resumes per its `resume`; a clean close writes
+  its stopped runs back so the next activation counts nothing (as Durable's `writeAtClose`); a `ctx.state.change`
+  resets the count; at five in a row the run ends `failed { kind: "restart_limit", restarts }` (a new `JobError`),
+  `finish` runs, `job_interrupted` is reported. Supersedes design §15's `blocked { restart_limit }` (no parking, as
+  Durable since #11139).
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

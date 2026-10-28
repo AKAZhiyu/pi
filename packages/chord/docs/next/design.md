@@ -1402,7 +1402,8 @@ host.serve(ChatStore, ({ conversation }, self) => {          // local: no princi
   );
   type JobError =
     | { readonly kind: "threw"; readonly error: ChordError | PluginError }   // run threw (reported)
-    | { readonly kind: "aborted"; readonly reason: "abort" | "reload" | "restart" };
+    | { readonly kind: "aborted"; readonly reason: "abort" | "reload" | "restart" }
+    | { readonly kind: "restart_limit"; readonly restarts: number };       // persisted runs (slice 6b)
     // abort(id); a native restart on reload (slice 7); "restart": a persisted run abandoned after a crash (slice 6b),
     // or a run cut off by its attempt's seal while the object continues (slice 6a)
   ```
@@ -1441,8 +1442,11 @@ host.serve(ChatStore, ({ conversation }, self) => {          // local: no princi
   `run`, args mapped forwards, state migrated; only work since the last state change repeats, so it must be
   idempotent) or abandon (`finish` gets `failed { aborted, reason: "restart" }`); wording aligned with Durable
   (replay-safe, abandon on restart). A recorded outcome resumes only `finish`, never `run`; an abort request is
-  persisted. A restart limit as Durable's: five crash interruptions, counted and persisted, clean closes not counted;
-  then `blocked { restart_limit }`, cleared by `abort` or a reload. A persisted state document may use the deferred
+  persisted. A restart limit as Durable's (owner, 2026-10-27, slice 6b D6): at activation a run recorded `running` was
+  cut off by a crash: `restarts + 1`, stored, then it resumes (rerun or abandon); a clean close writes its stopped runs
+  back so the next activation counts nothing; a `ctx.state.change` (progress) resets the count; at five in a row the
+  run ends with `failed { kind: "restart_limit", restarts }`, `finish` runs, `job_interrupted` is reported (no
+  parking, as Durable since #11139). A persisted state document may use the deferred
   persistence option (stored within about a second, flushed before the outcome is recorded).
 - **Chaining:** `finish` may `tx.start` the next job, atomically with the outcome (separate steps, branches).
 - **Not jobs:** request/response work (a method), standing behaviour (a routine), input into running work (a flow,
