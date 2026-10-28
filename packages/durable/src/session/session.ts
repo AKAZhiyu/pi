@@ -344,6 +344,11 @@ export class SessionImpl implements Session {
 		return ms;
 	}
 
+	/** Internal: whether `tx` is the transaction of one of this Session's commits. */
+	ownsTransaction(tx: Tx): tx is Transaction {
+		return Transaction.ownedBy(tx, this.#host);
+	}
+
 	/** Internal: run a read-only job on the mutation line so multi-read derivations observe one committed state. */
 	readOnLine<T>(job: () => Promise<T>): Promise<T> {
 		try {

@@ -123,8 +123,12 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 		return this.#host.harness.commitWith((tx) => configure(tx, this.id, change), context);
 	}
 
-	submit(submission: SubmissionDraft, context: Context): Promise<Submission> {
-		return this.#host.submissions.submit(this.id, submission, context);
+	submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
+	submit(tx: Tx, submission: SubmissionDraft): Promise<SubmissionId>;
+	submit(first: SubmissionDraft | Tx, second: Context | SubmissionDraft): Promise<Submission | SubmissionId> {
+		// The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+		if ("type" in first) return this.#host.submissions.submit(this.id, first, second as Context);
+		return this.#host.submissions.admit(first, this.id, second as SubmissionDraft);
 	}
 
 	async compact(instructions: string | undefined, context: Context): Promise<TaskId<CompactionResult>> {
@@ -536,18 +540,30 @@ function boundConversation(
 			return operation(bind(context));
 		};
 	};
+	function submit(draft: SubmissionDraft, context: Context): Promise<Submission>;
+	function submit(tx: Tx, draft: SubmissionDraft): Promise<SubmissionId>;
+	async function submit(
+		first: SubmissionDraft | Tx,
+		second: Context | SubmissionDraft,
+	): Promise<Submission | SubmissionId> {
+		binding.check();
+		// The overloads pair a draft with a context, and anything else (a transaction) with a draft.
+		if (!("type" in first)) {
+			// The caller's commit carries its own context, so the invocation's abort is checked here.
+			binding.signal.throwIfAborted();
+			return submissions.admit(first, id, second as SubmissionDraft);
+		}
+		const submission = await submissions.submit(id, first, bind(second as Context));
+		return {
+			id: submission.id,
+			status: bound((callContext) => submission.status(callContext)),
+			wait: bound((callContext) => submission.wait(callContext)),
+			abort: bound((callContext) => submission.abort(callContext)),
+		};
+	}
 	return {
 		id,
-		submit: async (draft, context) => {
-			binding.check();
-			const submission = await submissions.submit(id, draft, bind(context));
-			return {
-				id: submission.id,
-				status: bound((callContext) => submission.status(callContext)),
-				wait: bound((callContext) => submission.wait(callContext)),
-				abort: bound((callContext) => submission.abort(callContext)),
-			};
-		},
+		submit,
 		abort: async (context, options) => {
 			binding.check();
 			return tasks.abortConversation(id, options?.background === true, bind(context));

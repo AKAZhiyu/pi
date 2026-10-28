@@ -152,12 +152,15 @@ export type HooksOf<K> = K extends Task<infer _I, infer _S, infer _R, infer H> ?
 
 /**
  * Invocation-bound conversation operations for tasks and tools. Rejects after the invocation ends. `submit` takes any
- * submission, as `Conversation.submit()` does: a subagent's conversation is an ordinary one, so a tool may also continue
- * it.
+ * submission, in both forms of `Conversation.submit()`: a subagent's conversation is an ordinary one, so a tool may also
+ * continue it, and a task may admit a submission in the same commit as its own writes (`runtime.commit()`); entries
+ * the admission appends there carry the task's `byTaskId`. The transaction form also rejects once the invocation is
+ * aborted.
  */
 export interface ConversationHandle {
 	readonly id: ConversationId;
 	submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
+	submit(tx: Tx, submission: SubmissionDraft): Promise<SubmissionId>;
 	/** `Conversation.abort()`: withdraw queued inputs, abort the ordinary ownership scope, and wait until it is idle. */
 	abort(context: Context, options?: ConversationAbortOptions): Promise<void>;
 	/** Resolve when the conversation's ordinary ownership scope has no live non-background task. */
@@ -801,6 +804,17 @@ export interface Conversation {
 	 * it is, after placing queued items; a busy conversation rejects it with `ConversationBusy`, as it never queues.
 	 */
 	submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
+	/**
+	 * Admit a submission inside the caller's commit `tx` (`Harness.commit()`, `Conversation.commit()`, a task's
+	 * `runtime.commit()`), with the same rules, and return its ID: the admission is stored with that commit, or not at all
+	 * when the callback throws later or the commit fails. Call it before the commit's first table write (`appendEntry()`,
+	 * `createTask()`, `createSubmission()`, another admission): otherwise it throws `ReadAfterWrite`, on every path.
+	 * Documents may be read and written before and after it. A rejection (`ConversationBusy`, `ConversationIdle`) throws
+	 * before any write, so the callback may catch it. Do not call `Submission` or other Harness reads inside the callback:
+	 * they wait for the commit holding the line. Its `pi.durable.submit` span covers the admission only, so its `result`
+	 * is provisional. Throws for a transaction of another Session.
+	 */
+	submit(tx: Tx, submission: SubmissionDraft): Promise<SubmissionId>;
 	/**
 	 * Admit a write of a `pi.reset` entry that starts a new context, carrying `handoff` as a user message when given.
 	 * Resolves after admission; while busy, it is placed at the next boundary.

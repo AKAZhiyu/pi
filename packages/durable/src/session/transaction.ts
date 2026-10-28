@@ -254,6 +254,24 @@ export class Transaction implements Tx {
 		this.#scope = scope;
 	}
 
+	/** Internal: the context of the commit this transaction belongs to. */
+	get context(): Context {
+		return this.#context;
+	}
+
+	/** Internal: whether a table write was staged, after which table reads throw `ReadAfterWrite`. */
+	get hasTableWrite(): boolean {
+		return this.#hasTableWrite;
+	}
+
+	/**
+	 * Internal: whether `tx` is a transaction of a commit of the Session behind `host`. A brand check, so a proxy or
+	 * another wrapper of a transaction is not one.
+	 */
+	static ownedBy(tx: Tx, host: TransactionHost): tx is Transaction {
+		return #host in tx && tx.#host === host;
+	}
+
 	// ─── Table reads ────────────────────────────────────────────────────────
 
 	conversation(id: ConversationId): Promise<ConversationRecord | undefined> {
@@ -1063,7 +1081,7 @@ export class Transaction implements Tx {
 	#read<T>(method: string, read: () => Promise<T>): Promise<T> {
 		try {
 			this.#assertOpen();
-			if (this.#hasTableWrite) throw new ReadAfterWrite(method);
+			if (this.#hasTableWrite) throw new ReadAfterWrite(`Tx.${method}()`);
 			return this.#track(read());
 		} catch (error) {
 			return Promise.reject(error);

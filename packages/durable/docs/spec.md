@@ -709,6 +709,8 @@ type HooksOf<K> = K extends Task<infer _I, infer _S, infer _R, infer H>
 interface Conversation {
   readonly id: ConversationId;
   submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
+  /** Admit inside the caller's commit, with the same rules; stored with that commit (section 6). */
+  submit(tx: Tx, submission: SubmissionDraft): Promise<SubmissionId>;
   /** Resolved with the current registry snapshot and settings. */
   agent(context: Context): Promise<Agent>;
   /** `configure()` in its own commit. */
@@ -1921,6 +1923,10 @@ Table rules:
 - Any table read after the first table write throws `ReadAfterWrite`.
 - Document access and read-your-writes remain available after table writes.
 - Creation methods return their created ID/record; callers do not read it back.
+- `Conversation.submit(tx, draft)` and `ConversationHandle.submit(tx, draft)`
+  come before the commit's first table write, another admission's included;
+  otherwise they throw `ReadAfterWrite`, whether or not the admission would read
+  a table (section 6).
 
 Storage ownership:
 
@@ -2860,6 +2866,25 @@ the inbox holds queued items, so the input never starts a run: with
 `run === undefined`, the inverse of `busy` above. An idle input queues with
 mode `steer` when `whenBusy` is `steer` and `followUp` otherwise.
 
+`Conversation.submit(tx, draft)` runs the same admission inside the caller's
+commit instead of one of its own and returns the submission's ID; a task or tool
+does so through `ConversationHandle.submit(tx, draft)` in its own commit. The
+Harness supplies the clock, queue modes, the `pi.durable.submit` span (same
+parent, links, and trace carrier as `submit(draft, context)`), and the request
+for progress a started run needs. The admission's writes, a started run
+included, are stored with the caller's other writes in that commit, or not at
+all: a host can check its own documents and `pi.live`, admit, and record the
+submission in one commit. A rejection throws before any write. Admission must
+precede the commit's first table write, another admission's included: it throws
+`ReadAfterWrite` otherwise, on every path, also where it would read no table (a
+busy input without request ID or trace). Entries it appends inside a task's or
+tool's commit carry that task's `byTaskId`, as the commit's own appends do. The
+span covers the admission only: it ends before the caller's commit is stored,
+its `result` is provisional (a later throw in the callback or a storage failure
+leaves no submission), and the commit's events (`pi.durable.entry`,
+`pi.durable.submission`) go to the caller's commit context. A first argument
+that is not a draft is taken as a transaction; one of another Session throws.
+
 A continue starts a run on the context as it is, without a user message, for
 example after a run that ended without an answer. It is admitted only while the
 conversation is idle and never queues: whether a run can continue depends on how
@@ -3387,6 +3412,11 @@ interface ConversationHandle {
   readonly id: ConversationId;
   /** Any submission, as `Conversation.submit()` takes: a task may also continue a conversation it owns. */
   submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
+  /**
+   * Inside the invocation's commit (`runtime.commit()`, a tool's `api.commit()`), as `Conversation.submit(tx, ...)`;
+   * appended entries carry the task's `byTaskId`. Rejects once the invocation is aborted or ended.
+   */
+  submit(tx: Tx, submission: SubmissionDraft): Promise<SubmissionId>;
   abort(context: Context): Promise<void>;
   waitForIdle(context: Context): Promise<void>;
 }
@@ -6007,6 +6037,12 @@ These are contracts, not invitations to add defensive machinery:
   unsupported.
 - **Read after write:** read every required table row before the first table
   write. Document drafts remain usable afterward; table reads do not.
+- **Admission inside a commit:** `submit(tx, draft)` throws `ReadAfterWrite`
+  after the commit's first table write: one admission per commit, before the
+  commit's own `appendEntry()`, `createTask()`, or `createSubmission()`. The
+  admission is provisional until the commit is stored: a later throw in the
+  callback, or a storage failure, discards it with the rest of the commit,
+  though its `pi.durable.submit` span already ended with a `result`.
 - **Writing to a busy conversation:** only the Harness appends to a conversation
   with an active run. Raw entries appended by `Harness.commit()` or a custom
   task while a generation prepares its request can misplace its system prompt entries;
