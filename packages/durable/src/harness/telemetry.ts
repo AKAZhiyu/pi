@@ -52,13 +52,13 @@ export const DURABLE_TELEMETRY_SCHEMA = defineTelemetrySchema({
 	spans: {
 		"pi.durable.submit": {
 			description:
-				"Public submission admission and its commit. Inputs start root traces linked to their callers; writes are children. Internal admissions emit phase events only.",
+				"Public submission admission and its commit. Inputs and continues start root traces linked to their callers; writes are children. Internal admissions emit phase events only.",
 			parents: { kind: "any" },
 			startAttributes: {
 				"submission.type": {
 					type: "string",
 					required: true,
-					values: ["input", "write"],
+					values: ["input", "write", "continue"],
 					description: "Submission type.",
 				},
 				"conversation.id": { type: "number", required: true, description: "Conversation ID.", cardinality: "high" },

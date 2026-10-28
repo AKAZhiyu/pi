@@ -183,6 +183,11 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 				}
 			}
 			const view = await runtime.context(conversationId, context);
+			// The model owes an answer only to a context ending in a user message or tool results; system messages say
+			// nothing it answers. Otherwise, as for a continue after an answer or in an empty conversation, end the run
+			// before any request.
+			const last = view.messages.findLast((message) => message.role !== "system");
+			if (last?.role !== "user" && last?.role !== "toolResult") return failNothingToAnswer(runtime, context);
 			const shown = replaySections(view.messages);
 			let env: ExecutionEnv | undefined;
 			try {
@@ -218,9 +223,9 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 				return;
 			}
 			await runtime.commit(async (tx) => {
-				let cutoff = (await tx.scanEntries({ conversationId }, 1)).items[0]?.id;
+				// The context ends in a message the model answers, so the conversation has an entry.
+				let cutoff = (await tx.scanEntries({ conversationId }, 1)).items[0]!.id;
 				for (const entry of entries) cutoff = (await tx.appendEntry(SystemEntry, conversationId, entry)).id;
-				if (cutoff === undefined) throw new Error(`Conversation ${conversationId} has no entries to send`);
 				// Checked in this commit, so a compaction admitted during preparation counts.
 				if (threshold === "background" && (await tx.doc(LiveDoc, conversationId)).compactions === undefined) {
 					await createCompaction(tx, conversationId, { reason: "threshold" });
@@ -549,6 +554,18 @@ async function failNoModel(runtime: Runtime, ref: ModelRef | undefined, context:
 			settlement: { status: "unanswered", reason: "no_model" },
 		});
 		return { status: "terminal", outcome: { status: "failed", error: { message, detail: { reason: "no_model" } } } };
+	}, context);
+}
+
+/** End the run without a request: its context has nothing the model would answer. */
+async function failNothingToAnswer(runtime: Runtime, context: Context): Promise<void> {
+	const message = "The conversation has nothing to answer";
+	await runtime.commit(async (tx) => {
+		const failure = await prepareFailure(tx, runtime);
+		const live = await tx.doc(LiveDoc, runtime.conversationId);
+		await endFailedRun(tx, runtime, live, failure, { status: "unanswered", reason: "nothing_to_answer" });
+		const error = { message, detail: { reason: "nothing_to_answer" } };
+		return { status: "terminal", outcome: { status: "failed", error } };
 	}, context);
 }
 

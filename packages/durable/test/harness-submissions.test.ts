@@ -64,7 +64,7 @@ describe("submissions", () => {
 		const submission = await root.submit({ type: "input", content: "hi" }, context);
 		await busy.reached;
 		const record = await submission.status(context);
-		if (record.status !== "placed") throw new Error(`Unexpected ${record.status}`);
+		if (record.type !== "input" || record.status !== "placed") throw new Error(`Unexpected ${record.status}`);
 		const entry = await root.commit((tx) => tx.entry(UserEntry, record.entry), context);
 		expect(entry?.model).toEqual([{ role: "user", content: "hi", timestamp: 42 }]);
 		const live = await harness.snapshot(LiveDoc, root.id, context);

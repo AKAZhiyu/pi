@@ -241,6 +241,32 @@ type SubmissionRecord =
           readonly reason: string;
           readonly detail?: JsonValue;
         }
+    ))
+  /** A run without a user message (section 6): no entry, never queued. */
+  | (SubmissionRecordBase & {
+      readonly type: "continue";
+    } & (
+      | {
+          readonly status: "placed";
+          readonly entry?: never;
+          readonly answer?: never;
+          readonly reason?: never;
+          readonly detail?: never;
+        }
+      | {
+          readonly status: "done";
+          readonly entry?: never;
+          readonly answer: EntryId;
+          readonly reason?: never;
+          readonly detail?: never;
+        }
+      | {
+          readonly status: "unanswered";
+          readonly entry?: never;
+          readonly answer?: never;
+          readonly reason: string;
+          readonly detail?: JsonValue;
+        }
     ));
 
 type SubmissionSettlement =
@@ -347,6 +373,13 @@ type SubmissionDraft = {
       readonly type: "write";
       readonly entry: EntryDraft;
       readonly content?: never;
+      readonly whenBusy?: never;
+    }
+  /** Start a run on the context as it is, without a user message; idle only (section 6). */
+  | {
+      readonly type: "continue";
+      readonly content?: never;
+      readonly entry?: never;
       readonly whenBusy?: never;
     }
 );
@@ -1410,7 +1443,7 @@ interface Tx {
   ): Promise<TaskId<R>>;
   /** Raw submission record; no admission rules (busy check, inbox, placement). Hosts use `Conversation.submit()`. */
   createSubmission(create: SubmissionCreate): Promise<SubmissionRecord>;
-  /** Settle a queued or placed submission; only a placed input can be answered. A settled one stays unchanged. */
+  /** Settle a queued or placed submission; only a placed input or continue can be answered. A settled one stays unchanged. */
   settleSubmission(id: SubmissionId, settlement: SubmissionSettlement): void;
   /** Newest visible entry of the conversation that carries a `head`. */
   latestHeadMarker(conversationId: ConversationId): Promise<(EntryRecord & { readonly head: EntryId }) | undefined>;
@@ -2795,12 +2828,14 @@ Admission and terminal transitions:
 | action | submission state | other writes |
 |---|---|---|
 | input, idle with empty inbox | `placed`, with user entry | create run and generation |
+| continue, idle | `placed`, no entry | place queued items (final boundary); create run and generation with them and itself |
+| continue, busy | none | reject with `ConversationBusy` |
 | display-only write, no queued reset | `done`, with entry | append entry; no run |
 | write, idle with empty inbox | `done`, with entry | append entry; no run |
 | input or other write, busy or non-empty inbox | `queued` | append inbox item |
 | boundary places user item | `placed`, with entry | add ID to current or successor run |
 | boundary places write | `done`, with entry | append entry |
-| run answers | input `done`, with required answer entry | remove `run`, or hand it to a successor |
+| run answers | input or continue `done`, with required answer entry | remove `run`, or hand it to a successor |
 | run fails or its task aborts | input `unanswered`, with reason | remove `run`; inbox per `afterFailedRun` below |
 | withdraw queued item | `unanswered`, reason `aborted` | remove inbox item |
 | stale head write | `unanswered`, reason `stale` | remove inbox item |
@@ -2810,8 +2845,26 @@ for the other submission type rejects. A busy input with `whenBusy: "reject"`
 writes no record and reports `ConversationBusy`. An idle input queues with mode
 `steer` when `whenBusy` is `steer` and `followUp` otherwise.
 
+A continue starts a run on the context as it is, without a user message, for
+example after a run that ended without an answer. It is admitted only while the
+conversation is idle and never queues: whether a run can continue depends on how
+the current one ends, so a busy conversation rejects it with `ConversationBusy`
+before any write. Its record is `placed` without an entry; an idle conversation's
+queued items are placed first by a final boundary in the same commit, and its
+selected user items join the run, ahead of the continue. Whether the context has
+anything to answer is checked when the run's generation prepares (section 8.3),
+not at admission: a context that does not end in a user message or tool results,
+system messages aside, ends the run without a request, `unanswered` with
+`nothing_to_answer`. An answer cut off at its output limit (`length`) is an
+answer, so a text answer is not continued; one with tool calls is, because its
+calls never ran and the context ends in their synthesized `missing_result`
+error results (section 2.1). A host offers continue while the conversation is
+idle and `pi.live.runFailure` is set (section 8.2); a stale failure (one a later
+run started in its commit kept) settles `nothing_to_answer`. Each continue starts
+a run with its own turn budget.
+
 `settings.afterFailedRun` decides what a run that fails with `model_error`,
-`no_model`, `interrupted`, or `restart_limit` does with the inputs queued behind it, in the commit that settles its
+`no_model`, `interrupted`, `restart_limit`, or `nothing_to_answer` does with the inputs queued behind it, in the commit that settles its
 own inputs: `keep` (the default) leaves them queued; `continue` applies the
 final boundary, so the next run starts with them, as after an answer;
 `withdraw` settles them `unanswered` with reason `run_failed`, keeping queued
@@ -3316,7 +3369,8 @@ type ToolExecutionResult<TDetails extends JsonValue = JsonValue> = {
 
 interface ConversationHandle {
   readonly id: ConversationId;
-  submit(submission: InputSubmissionDraft, context: Context): Promise<Submission>;
+  /** Any submission, as `Conversation.submit()` takes: a task may also continue a conversation it owns. */
+  submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
   abort(context: Context): Promise<void>;
   waitForIdle(context: Context): Promise<void>;
 }
@@ -4347,7 +4401,16 @@ type RunFailure = {
   taskId: TaskId;
   /** The run's inputs, settled `unanswered`. */
   inputs: SubmissionId[];
-  reason: "model_error" | "no_model" | "aborted" | "reset" | "faulted" | "orphaned" | "interrupted" | "restart_limit";
+  reason:
+    | "model_error"
+    | "no_model"
+    | "aborted"
+    | "reset"
+    | "faulted"
+    | "orphaned"
+    | "interrupted"
+    | "restart_limit"
+    | "nothing_to_answer";
   /**
    * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
    * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
@@ -4440,6 +4503,7 @@ that settles its inputs `unanswered`:
 | `orphaned` | its task was aborted while no definition could take it; `detail` is the reason | the reason |
 | `interrupted` | the host stopped while the model was answering, with no retry left (section 8.3); `detail` names the attempt | `interrupted` with the text |
 | `restart_limit` | its generation was cut off `restartLimit` times in a row (section 5.4), also while an interrupted request was charged; `detail` says in which phase | `restart_limit` with the text |
+| `nothing_to_answer` | its generation found a context that does not end in a user message or tool results, system messages aside, such as a continue after an answer (section 8.3); no `detail` | `nothing_to_answer` |
 
 The next commit that starts a run removes it. A run started in the same commit,
 the queue's next run under `afterFailedRun: "continue"` (section 6) or after a
@@ -4519,7 +4583,13 @@ The run's inputs live in `pi.live.run`, not in the task input.
   the settings once. When the agent has no model or `models.getModel()` does
   not know it, the task fails with `no_model`. When it resumes with `overflow`
   and its compaction did not complete with an `entryId`, the run fails with
-  `model_error` and the overflow text as detail. Otherwise one commit appends
+  `model_error` and the overflow text as detail. When the committed model
+  context does not end in a user message or tool results, system messages
+  aside (it is empty, or ends in an answer, as for a continue after one), the
+  run fails with `nothing_to_answer` before any section is rendered or request
+  sent. Only roles count: a `length` answer with only text ends the context,
+  while one with tool calls is followed by the error results synthesized for
+  its calls (section 2.1), so a continue answers those. Otherwise one commit appends
   the planned `pi.system` entries and moves to `request` with the new tail as
   `cutoff`, the agent's model and thinking level, and the settings' stream
   options. These stay fixed for this request attempt; a retry prepares again. `compacted` carries over to
@@ -4653,9 +4723,10 @@ A tool round starts in the commit that appends the tool-calling answer:
 4. `pi.live.tools` receives the round's slots (section 8.2), and `generation` is
    removed.
 
-Input submissions settle `unanswered` with one of these reasons: `no_model`,
-`model_error` (detail: provider error text), `aborted`, `faulted` (detail: error
-message), or an orphaning blocked reason (section 5.4). Fault and orphan
+Input and continue submissions settle `unanswered` with one of these reasons:
+`no_model`, `model_error` (detail: provider error text), `nothing_to_answer`,
+`aborted`, `faulted` (detail: error message), or an orphaning blocked reason
+(section 5.4). Fault and orphan
 settlement convert a committed partial into an aborted `pi.assistant` entry,
 like the abort handler.
 

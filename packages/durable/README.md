@@ -540,9 +540,21 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 - `await submission.abort(context)` withdraws a queued submission.
 - The [settings](#settings) `steeringMode: "all"` and `followUpMode: "all"` place every queued item at once instead of one per turn.
 
-If a run fails, queued items stay in the inbox until the next input or queued write places them, oldest first.
+If a run fails, queued items stay in the inbox until the next input, queued write, or continue places them, oldest first.
 
-When a run ends without an answer, `docs["pi.live"].runFailure` says why until the next run starts: `model_error` and `no_model` (with the error text or the missing model in `detail`), `aborted`, `reset`, `interrupted` (the host stopped while the model answered, with no retry left), or `faulted`, `orphaned`, and `restart_limit` (the run's task could not go on). The run's inputs are in it too, settled `unanswered`; the settlement's reason is the same, except that an orphaned run's inputs carry why it was orphaned (`missing_task`, `task_too_old`, `migration_failed`) and `no_model` has no `detail` there (spec §8.2).
+When a run ends without an answer, `docs["pi.live"].runFailure` says why until the next run starts: `model_error` and `no_model` (with the error text or the missing model in `detail`), `aborted`, `reset`, `interrupted` (the host stopped while the model answered, with no retry left), `faulted`, `orphaned`, and `restart_limit` (the run's task could not go on), or `nothing_to_answer` (a continue, below, found nothing to answer). The run's inputs are in it too, settled `unanswered`; the settlement's reason is the same, except that an orphaned run's inputs carry why it was orphaned (`missing_task`, `task_too_old`, `migration_failed`) and `no_model` has no `detail` there (spec §8.2).
+
+To resume such a run without typing a message, submit a continue. It starts a run on the context as it is, so the model answers the user message or tool results the stopped run left:
+
+```typescript
+const live = await harness.snapshot(LiveDoc, root.id, context);
+if (live?.run === undefined && live?.runFailure !== undefined) {
+	const resumed = await root.submit({ type: "continue" }, context); // throws ConversationBusy while busy
+	await resumed.wait(context); // done with the answer, or unanswered like any run
+}
+```
+
+A continue is never queued: it throws `ConversationBusy` while a run is working, since whether there is anything to continue depends on how that run ends. Items a failed run left queued are placed first and join the run. A context with nothing to answer (empty, or ending in an answer, also a text answer cut off at its output limit) ends the run without a request, `unanswered` with `nothing_to_answer`. A cut-off answer with tool calls can be continued: its calls never ran, so the context ends in their error results. Tools can continue the conversations they own through `api.conversation(id)`, as they submit to them.
 
 An input is placed as a `pi.user` entry. To show it as something else, give it an `entry` with your kind and data; the model still sees `content` as the user message:
 

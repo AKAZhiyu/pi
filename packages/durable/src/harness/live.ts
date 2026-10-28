@@ -100,7 +100,9 @@ export type CompactionFailure = {
  * - `orphaned`: the run's task was aborted while no registered definition could take it;
  * - `interrupted`: the host stopped while the model was answering, more often than `settings.retry` retries;
  * - `restart_limit`: the run's generation was cut off `settings.restartLimit` times in a row; a request or poll it was
- *   cut off during counts as a failed attempt first, so this ends one whose charge itself keeps failing.
+ *   cut off during counts as a failed attempt first, so this ends one whose charge itself keeps failing;
+ * - `nothing_to_answer`: the context did not end in a user message or tool results (empty, or ending in an answer), so
+ *   no request was sent, as for a continue after an answer.
  */
 export type RunFailureReason =
 	| "model_error"
@@ -110,7 +112,8 @@ export type RunFailureReason =
 	| "faulted"
 	| "orphaned"
 	| "interrupted"
-	| "restart_limit";
+	| "restart_limit"
+	| "nothing_to_answer";
 
 /** The newest run that ended without an answer (spec §8.2). */
 export type RunFailure = {

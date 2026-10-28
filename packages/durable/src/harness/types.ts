@@ -63,7 +63,11 @@ export type UserInput = UserMessage["content"];
  */
 export type InputEntry = { readonly kind: string; readonly data?: JsonValue };
 
-/** Host submission: user input that may start a run, or a passive entry write. */
+/**
+ * Host submission: user input that may start a run, a passive entry write, or a continue: a run without a new user
+ * message, for an idle conversation whose context the model still owes an answer (it ends in a user message or tool
+ * results, for example after a run that ended without an answer).
+ */
 export type SubmissionDraft = {
 	readonly requestId?: string;
 } & (
@@ -78,6 +82,19 @@ export type SubmissionDraft = {
 			readonly type: "write";
 			readonly entry: EntryDraft;
 			readonly content?: never;
+			readonly whenBusy?: never;
+	  }
+	| {
+			/**
+			 * Start a run on the context as it is, without a user message. Only when idle: a busy conversation rejects it with
+			 * `ConversationBusy`, and it never queues. Items kept in `pi.inbox` are placed first and join the run. A context
+			 * with nothing to answer (empty, or ending in an answer, also a text answer cut off at its output limit) ends the
+			 * run without a request, `unanswered` with `nothing_to_answer`. A cut-off answer with tool calls is continued:
+			 * its calls never ran, and the context ends in their error results (`missing_result`).
+			 */
+			readonly type: "continue";
+			readonly content?: never;
+			readonly entry?: never;
 			readonly whenBusy?: never;
 	  }
 );
@@ -127,12 +144,13 @@ export type ConversationAbortOptions = {
 export type HooksOf<K> = K extends Task<infer _I, infer _S, infer _R, infer H> ? H : never;
 
 /**
- * Invocation-bound conversation operations for tasks and tools. Rejects after the invocation ends; passive entries are
- * written with ordinary transaction writes instead.
+ * Invocation-bound conversation operations for tasks and tools. Rejects after the invocation ends. `submit` takes any
+ * submission, as `Conversation.submit()` does: a subagent's conversation is an ordinary one, so a tool may also continue
+ * it.
  */
 export interface ConversationHandle {
 	readonly id: ConversationId;
-	submit(submission: InputSubmissionDraft, context: Context): Promise<Submission>;
+	submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
 	/** `Conversation.abort()`: withdraw queued inputs, abort the ordinary ownership scope, and wait until it is idle. */
 	abort(context: Context, options?: ConversationAbortOptions): Promise<void>;
 	/** Resolve when the conversation's ordinary ownership scope has no live non-background task. */
@@ -578,9 +596,10 @@ export type HarnessSettings = {
 	 */
 	readonly documentRetentionMs?: number;
 	/**
-	 * What a run that fails (`model_error`, `no_model`, `interrupted`, `restart_limit`) does with the inputs queued behind it: `keep` leaves them
-	 * queued until the next input or queued write, `continue` starts the next run with them, as an answer would, and
-	 * `withdraw` settles them `unanswered` with reason `run_failed`. Default `keep`.
+	 * What a run that fails (`model_error`, `no_model`, `interrupted`, `restart_limit`, `nothing_to_answer`) does with the
+	 * inputs queued behind it: `keep` leaves them queued until the next input or queued write, `continue` starts the
+	 * next run with them, as an answer would, and `withdraw` settles them `unanswered` with reason `run_failed`. Default
+	 * `keep`.
 	 */
 	readonly afterFailedRun?: AfterFailedRun;
 	/**
@@ -752,10 +771,11 @@ export interface Conversation {
 	configure(change: AgentChange, context: Context): Promise<void>;
 
 	/**
-	 * Durably admit user input or a passive entry write. A busy conversation, or one with queued items, queues input and
-	 * writes that affect model context in `pi.inbox`; `whenBusy: "reject"` rejects input with `ConversationBusy` instead
-	 * and writes nothing. A write of only `kind` and `data` (no `model`, `head`, or `edits`) is appended at once,
-	 * even mid-run, as it changes nothing the model sees.
+	 * Durably admit user input, a passive entry write, or a continue. A busy conversation, or one with queued items,
+	 * queues input and writes that affect model context in `pi.inbox`; `whenBusy: "reject"` rejects input with
+	 * `ConversationBusy` instead and writes nothing. A write of only `kind` and `data` (no `model`, `head`, or `edits`)
+	 * is appended at once, even mid-run, as it changes nothing the model sees. A continue starts a run on the context as
+	 * it is, after placing queued items; a busy conversation rejects it with `ConversationBusy`, as it never queues.
 	 */
 	submit(submission: SubmissionDraft, context: Context): Promise<Submission>;
 	/**

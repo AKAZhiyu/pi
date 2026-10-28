@@ -64,8 +64,8 @@ type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
 type SubmissionChange = SubmissionSettlement | { readonly status: "placed"; readonly entry: EntryId };
 
 /**
- * Complete record after applying one change. Placement turns a queued input `placed` and a queued write `done`; only a
- * placed input can be answered. A settled record stays.
+ * Complete record after applying one change. Placement turns a queued input `placed` and a queued write `done`; a
+ * continue is never queued, so never placed. Only a placed input or continue can be answered. A settled record stays.
  */
 function applySubmissionChange(current: SubmissionRecord, change: SubmissionChange): SubmissionRecord {
 	if (current.status === "done" || current.status === "unanswered") return current;
@@ -75,7 +75,7 @@ function applySubmissionChange(current: SubmissionRecord, change: SubmissionChan
 		return { ...current, status, entry: change.entry } as SubmissionRecord;
 	}
 	if (change.status === "done" && current.status !== "placed") {
-		throw new Error(`Submission ${current.id} is not a placed input`);
+		throw new Error(`Submission ${current.id} is not a placed input or continue`);
 	}
 	// Queued and placed records carry no answer, reason, or detail; an unanswered input keeps its entry.
 	return { ...current, ...change } as SubmissionRecord;
