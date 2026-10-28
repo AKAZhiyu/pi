@@ -131,7 +131,13 @@ describe("pi.live deltas", () => {
 		const result = entries.items.find((entry) => entry.kind === "pi.tool-result")!.id;
 		expect(commits).toEqual([
 			// submission
-			[["s", ["run"], { taskId: firstGeneration, inputs: [expect.any(Number)], turns: 0 }]],
+			[
+				[
+					"s",
+					["run"],
+					{ taskId: firstGeneration, inputs: [expect.any(Number)], turns: 0, first: expect.any(Number) },
+				],
+			],
 			// request
 			[["s", ["generation"], { attempt: 1 }]],
 			// the generation starts its tool round and keeps the run, counting the round as one turn (#11043)

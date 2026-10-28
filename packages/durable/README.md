@@ -540,7 +540,7 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 
 - **Steers** are placed after the current tool round and join the running work.
 - **Follow-ups** are placed when the run answers, and start the next run.
-- **`whenIdle: "reject"`** refuses an input when no run is working, so it never starts a run of its own. With `whenBusy: "steer"`, it steers the current run or throws `ConversationIdle`.
+- **`whenIdle: "reject"`** refuses an input when no run is working, so it never starts a run of its own. With `whenBusy: "steer"`, it steers the current run or throws `ConversationIdle`. A run that answered and waits for its [after-run tasks](#work-at-the-end-of-a-run) is still working, so such an input queues and starts the next run.
 - **`submit(tx, draft)`** admits inside your own commit, with the same rules, and returns the submission's ID. Your checks, the admission, and your writes are stored together or not at all:
 
   ```typescript
@@ -659,10 +659,46 @@ const Guard = defineExtension({
 });
 ```
 
-- **Generation:** `beforeRequest` (replace the messages of one request), `afterResponse`, `onYield` (continue the run with another user message), and `afterTools` (runs once a round's tools are done).
+- **Generation:** `beforeRequest` (replace the messages of one request), `afterResponse`, `onYield` (continue the run with another user message), `afterTools` (runs once a round's tools are done), and `afterRun` (tasks to run before the run ends, below).
 - **Tools:** `beforeTool` (block or rewrite arguments) and `afterTool` (replace the result). `afterTool` sees every result a tool task writes, also the error results the Harness writes itself (unavailable, invalid, blocked, interrupted, restart limit, aborted), told apart by their diagnostic code; past `settings.restartLimit` it no longer runs. On an abort it runs inside the abort handler, so a slow hook delays `abort()`.
 
 To limit a hook to some conversations, select its extension only there, for example with `configure({ extensions: { add: [Guard] } })`.
+
+Hooks read committed documents (`api.snapshot()`) and the conversation's raw history (`api.entry()`, `api.entries()`), which compaction never changes.
+
+### Work at the end of a run
+
+An `afterRun` hook starts durable work after a run answered, without a tool call: for example the project's tests after a run that edited files. It returns tasks, built with `runEndTask()`, and the generation creates them as its children and waits for them before the run ends:
+
+```typescript
+import { defineExtension, GenerationTask, hook, runEndTask, ToolResultEntry } from "@earendil-works/pi-durable";
+
+const TestsAfterEdits = defineExtension({
+	name: "tests-after-edits",
+	tasks: [RunTests], // a task of yours, defineTask(): runs the tests, then commits its result
+	hooks: [
+		hook(GenerationTask, {
+			afterRun: async (run, api, context) => {
+				// The run's own entries, also those a compaction summarized.
+				const range = { minEntryId: run.first, maxEntryId: run.last, order: "ascending" } as const;
+				const { items } = await api.entries(range, 1000, undefined, context); // page with `next` for longer runs
+				const edited = items.some((entry) => {
+					const message = entry.model?.[0];
+					return ToolResultEntry.is(entry) && message?.role === "toolResult" && message.toolName === "edit";
+				});
+				return edited ? { tasks: [runEndTask(RunTests, { command: "npm test" })] } : undefined;
+			},
+		}),
+	],
+});
+```
+
+- **When:** after a final answer or a `terminate` round, not while an `onYield` continuation keeps the run going, never after a failure or an abort.
+- **The answer first:** the answer is committed and the run's inputs settle `done` before the hooks are asked, so `Submission.wait()` resolves at the answer.
+- **Busy until done:** `pi.live.run` stays, with `run.afterRun` listing the tasks, so the conversation is busy and `waitForIdle()` includes them; Stop aborts them; a crash resumes them. A crash before they exist asks the hooks again, never twice once they do.
+- **Input meanwhile:** steers and follow-ups queue and start the next run once the tasks are done; `whenBusy: "reject"` and a continue throw `ConversationBusy`.
+- **Results for the model:** a task gets its conversation's handle before its commit, `const handle = (await runtime.conversation(runtime.conversationId, context))!`, and admits a write or a follow-up (say "the tests failed: ...") inside it with `handle.submit(tx, draft)`, before its own table writes. Both are placed when the run ends: a write before any queued user input, a follow-up in queue order with the rest. A follow-up starts a fix run, which asks `afterRun` again with a fresh turn budget, so cap such loops in your extension.
+- **Broken requests** (an uninstalled or built-in task, a non-JSON input, a throwing `initial()`) are reported through `onReport` against the hook's extension and skipped; the run still ends.
 
 ## More Conversations and Forks
 
@@ -917,6 +953,7 @@ node --conditions=source --experimental-strip-types test/examples/13-chat.ts
 | [29-tool-override](test/examples/29-tool-override.ts) | A same-name bash for some conversations, and a wrapper that times whichever bash won |
 | [30-reload-and-restart](test/examples/30-reload-and-restart.ts) | Reloading an extension mid-call, and stored choices surviving a restart |
 | [31-transcript](test/examples/31-transcript.ts) | A client's transcript over the windowed view: live appends, a stall with a gap, loading it and earlier pages, and resuming with `from` |
+| [32-tests-after-edits](test/examples/32-tests-after-edits.ts) | An `afterRun` hook that runs the tests after every run that edited files, a fix run when they fail, and input waiting for them |
 | [00](test/examples/00-conversation.ts)–[12](test/examples/12-recovery.ts) | The layers underneath: sessions, documents, forks, watches, the Harness, agent configuration, reload, extension state, tasks, recovery |
 
 Examples that call OpenAI need `OPENAI_API_KEY`; most use the faux provider otherwise.

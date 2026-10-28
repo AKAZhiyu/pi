@@ -269,9 +269,10 @@ export async function admitSubmission(
 		if (busy) throw new ConversationBusy(conversationId);
 		const boundary = await prepareBoundary(tx, conversationId, queueModes);
 		const { id } = await tx.createSubmission({ ...fields, type: "continue", status: "placed" });
-		// Items an earlier failed run left queued (`afterFailedRun: "keep"`) are placed first and join the run.
-		const { users } = await applyBoundary(tx, boundary, "final", now);
-		await startRun(tx, conversationId, live, [...users, id]);
+		// Items an earlier failed run left queued (`afterFailedRun: "keep"`) are placed first and join the run. Its history
+		// starts with the failed run's, so `afterRun` hooks see what that run did.
+		const { users, first } = await applyBoundary(tx, boundary, "final", now);
+		await startRun(tx, conversationId, live, { inputs: [...users, id], first: live.runFailure?.first ?? first });
 		return { id, status: "placed" };
 	}
 	// A boundary reads the table, so it is prepared before the first table write; a busy one needs none.
@@ -295,8 +296,8 @@ export async function admitSubmission(
 			items.push({ id, mode, content, ...entry });
 		}
 		if (boundary === undefined) return { id, status: "queued" };
-		const { users } = await applyBoundary(tx, boundary, "final", now);
-		if (users.length > 0) await startRun(tx, conversationId, live, users);
+		const { users, first } = await applyBoundary(tx, boundary, "final", now);
+		if (users.length > 0) await startRun(tx, conversationId, live, { inputs: users, first });
 		return { id, status: draft.type === "write" ? "done" : users.at(-1) === id ? "placed" : "queued" };
 	}
 	if (draft.type === "write") {
@@ -314,6 +315,6 @@ export async function admitSubmission(
 	const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now);
 	const input = { ...fields, type: "input", status: "placed", entry: entry.id } as const;
 	const { id } = await tx.createSubmission(input);
-	await startRun(tx, conversationId, live, [id]);
+	await startRun(tx, conversationId, live, { inputs: [id], first: entry.id });
 	return { id, status: "placed" };
 }

@@ -2114,7 +2114,13 @@ export class TaskScheduler {
 			},
 			commit: async (change, context, options) => {
 				let checkpoint: string | undefined;
-				let interrupted: { readonly error: TaskOutcomeError; readonly restarts: number } | undefined;
+				let interrupted:
+					| {
+							readonly message: string;
+							readonly reason: "restart_limit" | "interrupted";
+							readonly restarts: number;
+					  }
+					| undefined;
 				await this.#gated(
 					invocation,
 					async (tx, current) => {
@@ -2124,9 +2130,16 @@ export class TaskScheduler {
 							checkpoint = next.checkpoint.phase;
 						}
 						// A task that ends for crashes says so (`task_interrupted`), so a host keeps a crash-loop signal.
-						if (next?.status === "terminal" && next.outcome.status === "failed") {
-							if (interruptionOf(next.outcome.error) !== undefined) {
-								interrupted = { error: next.outcome.error, restarts: current.restarts ?? 0 };
+						if (next?.status === "terminal") {
+							const restarts = current.restarts ?? 0;
+							const reason = next.outcome.status === "failed" ? interruptionOf(next.outcome.error) : undefined;
+							if (reason !== undefined && next.outcome.status === "failed") {
+								interrupted = { message: next.outcome.error.message, reason, restarts };
+							} else {
+								// A task that ended for crashes with another outcome says so itself, as a generation whose run
+								// answered ends `completed` without its after-run tasks.
+								const message = endedByCrashesStates.get(next);
+								if (message !== undefined) interrupted = { message, reason: "restart_limit", restarts };
 							}
 						}
 					},
@@ -2135,11 +2148,11 @@ export class TaskScheduler {
 				);
 				if (interrupted !== undefined) {
 					this.#report(
-						new Error(interrupted.error.message),
+						new Error(interrupted.message),
 						{
 							kind: "task_interrupted",
 							...this.#aboutTask(invocation),
-							reason: interruptionOf(interrupted.error)!,
+							reason: interrupted.reason,
 							restarts: interrupted.restarts,
 						},
 						invocation.context,
@@ -2407,6 +2420,19 @@ function recordTask(record: Pick<AnyTaskRecord, "id" | "kind" | "conversationId"
  * The restart count starts over: it now counts cut-offs of the abort handler.
  */
 /** Why a failed outcome's error says crashes ended the task (`detail.reason`), if it does. */
+/**
+ * Terminal states a built-in task commits because it was cut off `settings.restartLimit` times, when their outcome does
+ * not say so (a failure with detail `{ reason: "restart_limit" }` does), with the message the scheduler reports them
+ * `task_interrupted` with. Keyed by the state object the task returns, so nothing is added to the stored state.
+ */
+const endedByCrashesStates = new WeakMap<object, string>();
+
+/** `state`, marked as ending its task for crashes (`task_interrupted` with `message`), whatever its outcome. */
+export function endedByCrashes<T extends object>(state: T, message: string): T {
+	endedByCrashesStates.set(state, message);
+	return state;
+}
+
 function interruptionOf(error: TaskOutcomeError): "restart_limit" | "interrupted" | undefined {
 	const detail = error.detail;
 	if (typeof detail !== "object" || detail === null || !("reason" in detail)) return undefined;

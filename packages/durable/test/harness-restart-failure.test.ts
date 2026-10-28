@@ -220,7 +220,7 @@ describe("a generation interrupted while the model answers (#11139)", () => {
 			detail: text,
 		});
 		expect(await live(opened.harness)).toEqual({
-			runFailure: { taskId, inputs: [id], reason: "interrupted", detail: text },
+			runFailure: { taskId, inputs: [id], reason: "interrupted", detail: text, first: expect.any(Number) },
 		});
 		expect((await opened.harness.waitForTask(taskId, context)).state.outcome).toEqual({
 			status: "failed",
@@ -351,7 +351,7 @@ describe("a generation interrupted while the model answers (#11139)", () => {
 			detail: text,
 		});
 		expect(await live(opened.harness)).toEqual({
-			runFailure: { taskId, inputs: [id], reason: "restart_limit", detail: text },
+			runFailure: { taskId, inputs: [id], reason: "restart_limit", detail: text, first: expect.any(Number) },
 		});
 		await waitFor(() => setup.infos.length > 0);
 		expect(setup.infos).toContainEqual(
@@ -563,7 +563,7 @@ describe("crash edges (#11139)", () => {
 			detail: text,
 		});
 		expect(await live(opened.harness)).toEqual({
-			runFailure: { taskId, inputs: [id], reason: "interrupted", detail: text },
+			runFailure: { taskId, inputs: [id], reason: "interrupted", detail: text, first: expect.any(Number) },
 		});
 		expect(setup.faux.state.cancelledDeferred).toHaveLength(1);
 		await opened.harness.close(context);
@@ -634,7 +634,7 @@ describe("crash edges (#11139)", () => {
 			detail: text,
 		});
 		expect(await live(opened.harness)).toEqual({
-			runFailure: { taskId, inputs: [id], reason: "restart_limit", detail: text },
+			runFailure: { taskId, inputs: [id], reason: "restart_limit", detail: text, first: expect.any(Number) },
 		});
 		const entries = await allEntries(opened.root);
 		expect(entries.map((entry) => entry.kind)).toEqual(["pi.user", "pi.assistant"]);
@@ -693,7 +693,9 @@ describe("crash edges (#11139)", () => {
 		}
 		const detail = `Abort handler of task ${taskId} (pi.generation) was cut off 2 times`;
 		expect(await settled(opened.harness, id)).toMatchObject({ status: "unanswered", reason: "aborted", detail });
-		expect(await live(opened.harness)).toEqual({ runFailure: { taskId, inputs: [id], reason: "aborted", detail } });
+		expect(await live(opened.harness)).toEqual({
+			runFailure: { taskId, inputs: [id], reason: "aborted", detail, first: expect.any(Number) },
+		});
 		expect((await opened.harness.waitForTask(taskId, context)).state.outcome).toMatchObject({
 			status: "faulted",
 			error: { detail: { reason: "restart_limit" } },

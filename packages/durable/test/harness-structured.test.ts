@@ -1253,7 +1253,7 @@ describe("tool rounds", () => {
 		const results = (await allEntries(root)).filter((entry) => ToolResultEntry.is(entry));
 		expect(results.map((entry) => (entry.model![0] as ToolResultMessage).toolCallId)).toEqual(["c1", "c2"]);
 		expect(await harness.snapshot(LiveDoc, root.id, context)).toEqual({
-			runFailure: { taskId: generation, inputs: [submission.id], reason: "aborted" },
+			runFailure: { taskId: generation, inputs: [submission.id], reason: "aborted", first: expect.any(Number) },
 		});
 		expect((await harness.waitForTask(generation, context)).state.outcome.status).toBe("aborted");
 		await harness.close(context);
@@ -1407,6 +1407,7 @@ describe("tool rounds", () => {
 				inputs: [submission.id],
 				reason: "faulted",
 				detail: "Value contains a non-JSON function; expected strict JSON",
+				first: expect.any(Number),
 			},
 		});
 		expect((await allEntries(reopened.root)).map((entry) => entry.kind)).toEqual(["pi.user", "pi.assistant"]);
