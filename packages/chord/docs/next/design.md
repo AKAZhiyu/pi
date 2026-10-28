@@ -1446,8 +1446,9 @@ host.serve(ChatStore, ({ conversation }, self) => {          // local: no princi
   cut off by a crash: `restarts + 1`, stored, then it resumes (rerun or abandon); a clean close writes its stopped runs
   back so the next activation counts nothing; a `ctx.state.change` (progress) resets the count; at five in a row the
   run ends with `failed { kind: "restart_limit", restarts }`, `finish` runs, `job_interrupted` is reported (no
-  parking, as Durable since #11139). A persisted state document may use the deferred
-  persistence option (stored within about a second, flushed before the outcome is recorded).
+  parking, as Durable since #11139). A persisted state document may defer storing a change
+  (`ctx.state.change(fn, ctx, { persistence: { kind: "deferred", withinMs? } })`, Durable's shape, default 1,000 ms;
+  stored before the outcome is recorded; slice 6b D8).
 - **Chaining:** `finish` may `tx.start` the next job, atomically with the outcome (separate steps, branches).
 - **Not jobs:** request/response work (a method), standing behaviour (a routine), input into running work (a flow,
   §20: the owner's document plus methods), multi-step durable work with sleeps, waits or ownership trees on a host

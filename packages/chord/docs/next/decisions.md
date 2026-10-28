@@ -1679,6 +1679,10 @@ validation and copies the v2 kernel added around Delta.
   and behaviour (`abortTask`): a running run's abort is stored and its signal fired, resolving `"marked"` once `run`
   settled; a finishing run is only marked; a blocked run is dropped (`"marked"`, as Durable's orphan); no unsettled run
   with that id resolves `"terminal"` (Chord keeps no settled runs, Q9). Supersedes "job.abort stays until 6b".
+- **Slice 6b D8: deferred persistence of a run's state, per change (owner, 2026-10-27: "agree"):** `ctx.state.change(fn,
+  ctx, { persistence: { kind: "deferred", withinMs? } })`, Durable's `CommitPersistence` shape (default 1,000 ms):
+  adopted and published at once, stored with the next immediate change, before the outcome is recorded, at close, or
+  after `withinMs`; a crash loses what is not stored. Only run state documents for now.
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

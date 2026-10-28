@@ -188,12 +188,11 @@ same; Durable throws for an unknown one).
 
 - **Deferred state persistence:**
 
-> **Decision needed (D8).** Design §15: "a persisted state document may use the deferred persistence option (stored
-> within about a second, flushed before the outcome is recorded)", as Durable's `CommitPersistence` `deferred`.
-> Options: (a) per change: `ctx.state.change(fn, ctx, { persistence: { kind: "deferred", withinMs? } })`, as Durable's
-> commit option; (b) per definition: `defineState(..., { persistDeferred: 1000 })`. Proposal: (a), Durable's shape: a
-> deferred change is adopted and published at once, stored with the next immediate change of the document, before
-> the outcome, at close, or after `withinMs` (default 1,000 ms); a crash loses it (acceptable for progress output).
+**Per change, Durable's shape (D8, owner, 2026-10-27):** `ctx.state.change(fn, ctx, { persistence: { kind:
+"deferred", withinMs? } })` (default 1,000 ms, as Durable's `CommitPersistence`): adopted and published at once,
+stored with the next immediate change of the document, before the outcome is recorded (so `outcome.state` has it), at
+close, or after `withinMs`; a crash loses what is not stored. Only run state documents; other persisted documents get
+it when a real case needs it.
 
 - **Fingerprint:** the job's fingerprint (args, result and state schemas) stored with every record; a record of the
   same version with another fingerprint is `blocked { version }` (slice 7's family; the carry-over's "a job
