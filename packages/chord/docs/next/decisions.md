@@ -1697,6 +1697,14 @@ validation and copies the v2 kernel added around Delta.
   context)`); the harness object (`Harness.open` over `StoreStorage`, `resume()` after the start barrier, the models,
   environments and extensions registries) is p3's base code, shown in Chord only as an example or test. Plan: Chord v2
   (6b, 7, 8, 9) this week, p3's design next week.
+- **Slice 6b R1: retirement per record by `history` (owner, 2026-10-27: "sgtm"; spec review, all four reviewers
+  found that Durable keeps retired records):** the engine's `history` gets three values, set by the adapter at
+  creation and applied at retirement: `none` (Chord's documents and job records: older revisions dropped at a new base,
+  row and revisions deleted at retirement, 6a's behaviour, until now called `latest`), `latest` (Durable's session, task
+  and latest conversation documents: older revisions dropped, the row kept with `retired_at` at retirement, so reads at
+  a point find it), `rewindable` (everything kept). `retireDocument` reads the record's `history`; no flag, archives
+  and replicas carry it. Rejected: keeping every retired record (one rule, but a dead row per finished job run, two
+  with its state, and per retired keyed document, that Chord never reads).
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the
