@@ -1691,6 +1691,12 @@ validation and copies the v2 kernel added around Delta.
   `undefined` attach fails the activation as a failed dependency; Durable's `failed` end ends the watches `failed`.
   Returns a `Watchable` (state member, derive source, `on` source). Supersedes the carry-over's `durableView` and D1's
   `durableView` part.
+- **Slice 8 is "Registries and `host.root`"; the harness object is p3's (owner, 2026-10-27: "we want to get chord done
+  this week. p3 needs design and is next week. just need all chord primitives in"):** Chord builds the primitives the
+  harness needs (registries, `self.writable`, `retryOn`, a `RegistryReader` for Durable, `host.root`, `chord(fn,
+  context)`); the harness object (`Harness.open` over `StoreStorage`, `resume()` after the start barrier, the models,
+  environments and extensions registries) is p3's base code, shown in Chord only as an example or test. Plan: Chord v2
+  (6b, 7, 8, 9) this week, p3's design next week.
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

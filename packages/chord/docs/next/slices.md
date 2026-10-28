@@ -49,7 +49,7 @@ Order (owner, 2026-10-22: routines and jobs before the store and reload).
 | 6a | **The store** | the store (backends, tables, queries, writes, commit queue, outbox, documents engine, migrations, export), persisted documents, `self.table`, keyed watches and retirement |
 | 6b | **Durable and jobs on the store** | persisted jobs, Durable's `StoreStorage`, the Chord source over Durable's views (`self.follow`) |
 | 7 | **Reload and rollout** | plugin loading, staging, swaps and restarts, revisions, `accepts` in use |
-| 8 | **Registries and the harness** | registries, `self.writable`, Durable's harness, `chord(fn, context)` |
+| 8 | **Registries and `host.root`** | registries, `self.writable`, `retryOn`, a `RegistryReader` for Durable, `host.root` and `chord(fn, context)` (the harness object is p3's base code) |
 | 9 | **Telemetry** | spans, events, metrics across hosts |
 
 The playground (`apps/chord-playground`) moves to the new code once slice 4 exists. Round-3 cuts (C3-C16) and
@@ -126,7 +126,7 @@ pattern, no code. Decided cuts are noted where they apply.
 | 22 | relays, size limits per part, compression at the origin, adapted bindings get diffs | 4a (relays), 4b (limits, compression), 7 |
 | 22 | trace carriers (R5) | 9 |
 | 23 | HTTP, channels, chunked transfers | after slice 9 (with the first real proof) |
-| 24 | Durable integration: harness object, `chord(fn, context)` (Q6), model and env registries | 8 |
+| 24 | Durable integration: `chord(fn, context)` (Q6), a `RegistryReader` over composed registries; the harness object and its model and env registries are p3's (base code, owner, 2026-10-27) | 8 (Chord parts), p3 |
 | 24 | `StoreStorage` | 6b |
 | 27 | versions table: contracts (L1 done), registries 8, documents 6, jobs 5, link protocol 3a | as listed |
 | 29 | telemetry spans, events, metrics, carriers | 9 (cost counters: every slice) |
@@ -231,7 +231,7 @@ deleted (the slice's spec and code are the record). Moved here from `carry-over.
 - **Retrying broken failures:** reload retries a broken object as `ref.retry()` does (`ChordObject.retry`: the
   backoff skipped, an attempt now; holders are told `loading`). (Slices 2, 3b.)
 
-### Slice 8: registries and the harness
+### Slice 8: registries and `host.root`
 
 - **`host.root(fn, context, { principal? })`**: a call scope for code outside objects, built with its first users
   (Durable hooks, `chord(fn, context)`); decide what an aborted, uncooperative `fn` means for its references (match
