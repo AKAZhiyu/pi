@@ -1775,7 +1775,8 @@ validation and copies the v2 kernel added around Delta.
   writes no billed rows, so making every `run` count would nearly double a small write on Durable Objects for callers
   that need no count (Durable's `SqliteStorage`): hence a separate method (option 2, owner). Name `runCounted`
   (owner). pi `8025c414d` (upstream first), with a real Durable Object test in Durable's workerd suite.
-- **Store errors: Durable's rule (owner, 2026-10-26; slice 6a spec review blocker 3):** any backend error in a commit
+- **Store errors: Durable's rule (owner, 2026-10-26; slice 6a spec review blocker 3; **superseded in part** by "Slice 6b
+  D4: the store has Durable's Storage semantics": a step failing before `COMMIT` rejects only its commit):** any backend error in a commit
   step is `storage_failed` (the store stops, every later commit and read rejects `unavailable/storage_failed`, a new
   reason in the protocol list; the host closes; `onError` once), as Durable's `GuardedStorage`: the SQLite facade cannot
   tell a failed statement from a failed `COMMIT`, and what reaches the step is a real storage problem or memory and disk
