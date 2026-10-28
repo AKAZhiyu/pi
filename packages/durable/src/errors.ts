@@ -66,3 +66,14 @@ export class ConversationBusy extends Error {
 		this.conversationId = conversationId;
 	}
 }
+
+/** An input with `whenIdle: "reject"` reached an idle conversation and was not admitted. */
+export class ConversationIdle extends Error {
+	readonly conversationId: ConversationId;
+
+	constructor(conversationId: ConversationId) {
+		super(`Conversation ${conversationId} is idle`);
+		this.name = "ConversationIdle";
+		this.conversationId = conversationId;
+	}
+}

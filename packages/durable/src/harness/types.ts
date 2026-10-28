@@ -75,6 +75,11 @@ export type SubmissionDraft = {
 			readonly type: "input";
 			readonly content: UserInput;
 			readonly whenBusy?: "steer" | "followUp" | "reject";
+			/**
+			 * `reject`: an idle conversation (no run) rejects the input with `ConversationIdle` and writes nothing, so the input
+			 * never starts a run. With `whenBusy: "steer"` it steers the current run or is refused.
+			 */
+			readonly whenIdle?: "reject";
 			/** Place the input as this entry; default `pi.user` without data. The kind must not start with `pi.`. */
 			readonly entry?: InputEntry;
 	  }
@@ -83,6 +88,7 @@ export type SubmissionDraft = {
 			readonly entry: EntryDraft;
 			readonly content?: never;
 			readonly whenBusy?: never;
+			readonly whenIdle?: never;
 	  }
 	| {
 			/**
@@ -96,6 +102,7 @@ export type SubmissionDraft = {
 			readonly content?: never;
 			readonly entry?: never;
 			readonly whenBusy?: never;
+			readonly whenIdle?: never;
 	  }
 );
 
@@ -788,7 +795,8 @@ export interface Conversation {
 	/**
 	 * Durably admit user input, a passive entry write, or a continue. A busy conversation, or one with queued items,
 	 * queues input and writes that affect model context in `pi.inbox`; `whenBusy: "reject"` rejects input with
-	 * `ConversationBusy` instead and writes nothing. A write of only `kind` and `data` (no `model`, `head`, or `edits`)
+	 * `ConversationBusy` instead and writes nothing. An idle conversation rejects `whenIdle: "reject"` input with
+	 * `ConversationIdle` and writes nothing. A write of only `kind` and `data` (no `model`, `head`, or `edits`)
 	 * is appended at once, even mid-run, as it changes nothing the model sees. A continue starts a run on the context as
 	 * it is, after placing queued items; a busy conversation rejects it with `ConversationBusy`, as it never queues.
 	 */

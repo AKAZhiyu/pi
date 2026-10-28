@@ -367,6 +367,8 @@ type SubmissionDraft = {
       readonly type: "input";
       readonly content: UserInput;
       readonly whenBusy?: "steer" | "followUp" | "reject";
+      /** `reject`: an idle conversation rejects the input with `ConversationIdle` (section 6). */
+      readonly whenIdle?: "reject";
       readonly entry?: never;
     }
   | {
@@ -374,6 +376,7 @@ type SubmissionDraft = {
       readonly entry: EntryDraft;
       readonly content?: never;
       readonly whenBusy?: never;
+      readonly whenIdle?: never;
     }
   /** Start a run on the context as it is, without a user message; idle only (section 6). */
   | {
@@ -381,6 +384,7 @@ type SubmissionDraft = {
       readonly content?: never;
       readonly entry?: never;
       readonly whenBusy?: never;
+      readonly whenIdle?: never;
     }
 );
 
@@ -2835,6 +2839,7 @@ Admission and terminal transitions:
 | input, idle with empty inbox | `placed`, with user entry | create run and generation |
 | continue, idle | `placed`, no entry | place queued items (final boundary); create run and generation with them and itself |
 | continue, busy | none | reject with `ConversationBusy` |
+| input with `whenIdle: "reject"`, idle | none | reject with `ConversationIdle` |
 | display-only write, no queued reset | `done`, with entry | append entry; no run |
 | write, idle with empty inbox | `done`, with entry | append entry; no run |
 | input or other write, busy or non-empty inbox | `queued` | append inbox item |
@@ -2848,8 +2853,12 @@ Admission and terminal transitions:
 
 `requestId` deduplicates within one conversation before any write; reusing one
 for the other submission type rejects. A busy input with `whenBusy: "reject"`
-writes no record and reports `ConversationBusy`. An idle input queues with mode
-`steer` when `whenBusy` is `steer` and `followUp` otherwise.
+writes no record and reports `ConversationBusy`. An idle input with
+`whenIdle: "reject"` writes no record and reports `ConversationIdle`, also when
+the inbox holds queued items, so the input never starts a run: with
+`whenBusy: "steer"` it steers the current run or is refused. Idle means
+`run === undefined`, the inverse of `busy` above. An idle input queues with
+mode `steer` when `whenBusy` is `steer` and `followUp` otherwise.
 
 A continue starts a run on the context as it is, without a user message, for
 example after a run that ended without an answer. It is admitted only while the

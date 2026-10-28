@@ -6,7 +6,7 @@ import {
 	type TelemetryContext,
 	type TelemetrySpan,
 } from "@earendil-works/pi-telemetry";
-import { ConversationBusy } from "../errors.ts";
+import { ConversationBusy, ConversationIdle } from "../errors.ts";
 import type { ObservedCommit, SessionImpl } from "../session/session.ts";
 import type { ConversationId, JsonObject, Storage, SubmissionId, SubmissionRecord, Tx } from "../types.ts";
 import { startRun } from "./generation.ts";
@@ -188,10 +188,11 @@ function checkInputEntry(entry: InputEntry): void {
  * Admit a submission inside a commit (spec §6); `Conversation.submit()` and conversation-owned compactions share it. A
  * known request ID returns its existing submission without writing. A display-only write (only `kind` and `data`) is
  * appended and settled `done` at once, busy or not, as it changes nothing the model sees; only behind a queued reset it
- * queues, so it lands after the reset instead of before it in the context the reset ends. A busy conversation queues anything else in
- * `pi.inbox`, or rejects `whenBusy: "reject"` input and any continue with `ConversationBusy`. An idle continue places
- * queued items and starts a run with them and itself, placing no entry of its own. An idle conversation with queued items
- * queues it behind them and runs a final boundary. Otherwise idle input places its entry (`pi.user`, or the input's
+ * queues, so it lands after the reset instead of before it in the context the reset ends. A busy conversation queues
+ * anything else in `pi.inbox`, or rejects `whenBusy: "reject"` input and any continue with `ConversationBusy`; an idle
+ * one rejects `whenIdle: "reject"` input with `ConversationIdle`. An idle continue places queued items and starts a run
+ * with them and itself, placing no entry of its own. An idle conversation with queued items queues it behind them and
+ * runs a final boundary. Otherwise idle input places its entry (`pi.user`, or the input's
  * own) and starts a run, and an idle write appends its entry and settles `done`, or `stale` when its head reaches
  * before the active range.
  */
@@ -235,6 +236,7 @@ export async function admitSubmission(
 		if (run?.trace !== undefined) span.addLink({ context: span.propagation.extract(run.trace) });
 	}
 	if (busy && draft.type === "input" && draft.whenBusy === "reject") throw new ConversationBusy(conversationId);
+	if (!busy && draft.type === "input" && draft.whenIdle === "reject") throw new ConversationIdle(conversationId);
 	if (draft.type === "continue") {
 		// Never queued: whether a run can continue depends on how the current one ends. Rejected before any write.
 		if (busy) throw new ConversationBusy(conversationId);
