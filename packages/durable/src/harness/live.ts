@@ -33,11 +33,10 @@ type SlotProgress = {
 
 /** Presentation of one tool call of the current round. */
 export type ToolSlot = SlotProgress & {
-	/**
-	 * Absent for a call not started yet (sequential round) and for a call its request did not offer, which starts `done`
-	 * with the `entry` generation wrote.
-	 */
+	/** Absent for a call not started yet (sequential round). */
 	taskId?: TaskId;
+	/** A call to a tool its request did not offer: its task settles `tool_unavailable` without running anything. */
+	unoffered?: true;
 	/** Result entry once done; absent when the tool task faulted or was orphaned. */
 	entry?: EntryId;
 };

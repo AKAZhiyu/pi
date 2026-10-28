@@ -327,7 +327,7 @@ describe("a run as the conversation view shows it", () => {
 		await harness.close(context);
 	});
 
-	it("ends a call that never runs with its result at once, and a tool aborted with its generation", async () => {
+	it("ends a call that never runs through its own task, and a tool aborted with its generation", async () => {
 		const setup = chatSetup();
 		addTool(
 			setup.registry,
@@ -352,13 +352,14 @@ describe("a run as the conversation view shows it", () => {
 		await submission.wait(context);
 		history.detach();
 		const states = history.live();
-		// The call not offered is listed done, with its result entry, in the commit of its calling answer.
+		// #11043: the call not offered is listed pending with its task in the commit of its calling answer, and its task
+		// ends it done with its result entry.
 		const listed = slotsOf(states, "c1").findIndex((slot) => slot !== undefined);
-		const ghost = slotsOf(states, "c1")[listed]!;
-		expect(ghost.status).toBe("done");
-		const listing = history.views[listed]!.entries;
-		expect(listing.map((entry) => entry.kind).slice(-2)).toEqual(["pi.assistant", "pi.tool-result"]);
-		expect(ghost.entry).toBe(listing.at(-1)!.id);
+		expect(slotsOf(states, "c1")[listed]).toMatchObject({ status: "pending", unoffered: true });
+		expect(slotsOf(states, "c1")[listed]!.taskId).toBeDefined();
+		expect(history.views[listed]!.entries.at(-1)!.kind).toBe("pi.assistant");
+		const ended = slotsOf(states, "c1").findIndex((slot) => slot?.status === "done");
+		expect(slotsOf(states, "c1")[ended]!.entry).toBe(history.views[ended]!.entries.at(-1)!.id);
 		// The aborted tool ends with its result entry, then the run ends without an answer.
 		const done = slotsOf(states, "c2").findIndex((slot) => slot?.status === "done");
 		expect(slotsOf(states, "c2")[done]!.entry).toBe(history.views[done]!.entries.at(-1)!.id);

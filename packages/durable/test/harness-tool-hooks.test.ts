@@ -19,6 +19,7 @@ import {
 	LiveDoc,
 	MemoryStorage,
 	type NestedToolExecutionResult,
+	ResetEntry,
 	ROOT_CONVERSATION_ID,
 	type Storage,
 	type TaskId,
@@ -622,5 +623,182 @@ describe("afterTool on results rebuilt from the slot", () => {
 			outcome: { status: "failed", error: { detail: { reason: "restart_limit" } } },
 		});
 		await opened.harness.close(context);
+	});
+});
+
+describe("calls to tools the request did not offer", () => {
+	// #11043
+	it("run afterTool inside their own tool task", async () => {
+		const setup = chatSetup();
+		const seen: { readonly id: string; readonly taskId: TaskId }[] = [];
+		addHooks(setup.registry, ToolTask, {
+			afterTool: (call, result, api) => {
+				seen.push({ id: call.id, taskId: api.taskId });
+				return { ...result, output: [{ type: "text", text: "try another tool" }] };
+			},
+		});
+		setup.faux.setResponses([calls(["ghost", {}, "c1"]), DONE]);
+		const { harness, root } = await openChat(new MemoryStorage(), setup);
+		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
+		expect(seen.map((each) => each.id)).toEqual(["c1"]);
+		expect(await harness.getTask(seen[0]!.taskId, context)).toMatchObject({
+			kind: "pi.tool",
+			input: { kind: "model", callId: "c1", unoffered: true },
+		});
+		const entries = await allEntries(root);
+		expect(text(results(entries).get("c1")).startsWith("try another tool|")).toBe(true);
+		expect(await diagnosticsOf(entries, "c1")).toEqual(["tool_unavailable"]);
+		await harness.close(context);
+	});
+
+	// #11043
+	it("count toward a round's terminate", async () => {
+		const setup = chatSetup();
+		addTool(
+			setup.registry,
+			tool("echo", async () => ({ output: [] })),
+		);
+		addHooks(setup.registry, ToolTask, {
+			afterTool: (_call, result) => ({ ...result, control: { terminate: true } }),
+		});
+		setup.faux.setResponses([calls(["echo", {}, "c1"], ["ghost", {}, "c2"]), DONE]);
+		const { harness, root } = await openChat(new MemoryStorage(), setup);
+		const settled = await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
+		expect(settled.status).toBe("done");
+		expect(setup.faux.state.callCount).toBe(1);
+		await harness.close(context);
+	});
+
+	// #11043
+	it("take their turn in a sequential round, and the last handoff in call order wins", async () => {
+		const setup = chatSetup();
+		setup.settings.toolExecution = "sequential";
+		const order: string[] = [];
+		for (const name of ["a", "b"]) {
+			addTool(
+				setup.registry,
+				tool(name, async () => {
+					order.push(name);
+					return { output: [] };
+				}),
+			);
+		}
+		addHooks(setup.registry, ToolTask, {
+			afterTool: (call, result) => {
+				order.push(`hook ${call.id}`);
+				return call.id === "c1" ? undefined : { ...result, control: { handoff: `from ${call.id}` } };
+			},
+		});
+		setup.faux.setResponses([calls(["a", {}, "c1"], ["ghost", {}, "c2"], ["b", {}, "c3"]), DONE]);
+		const { harness, root } = await openChat(new MemoryStorage(), setup);
+		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
+		expect(order).toEqual(["a", "hook c1", "hook c2", "b", "hook c3"]);
+		const resets = (await allEntries(root)).filter((entry) => ResetEntry.is(entry));
+		expect(resets.map((entry) => (entry.model?.[0] as { content: string }).content)).toEqual(["from c3"]);
+		await harness.close(context);
+	});
+
+	// #11043
+	it("each get a tool task in a parallel round of only such calls", async () => {
+		const setup = chatSetup();
+		const seen: string[] = [];
+		addHooks(setup.registry, ToolTask, {
+			afterTool: (call) => {
+				seen.push(call.id);
+				return undefined;
+			},
+		});
+		setup.faux.setResponses([calls(["ghost", {}, "c1"], ["spirit", {}, "c2"], ["ghost", {}, "c3"]), DONE]);
+		const { harness, root } = await openChat(new MemoryStorage(), setup);
+		const settled = await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
+		expect(settled.status).toBe("done");
+		expect(seen.sort()).toEqual(["c1", "c2", "c3"]);
+		const entries = await allEntries(root);
+		for (const id of ["c1", "c2", "c3"]) expect(await diagnosticsOf(entries, id)).toEqual(["tool_unavailable"]);
+		// The round's results go to the next request.
+		expect(setup.faux.state.callCount).toBe(2);
+		await harness.close(context);
+	});
+
+	// #11043
+	it("keep their flag in a version 2 generation's sequential round, also one migrated from version 1", async () => {
+		for (const version of [2, 1]) {
+			const path = await sqlitePath();
+			const setup = chatSetup();
+			setup.settings.toolExecution = "sequential";
+			const started = deferred();
+			let runs = 0;
+			const a = tool(
+				"a",
+				async (_args, _api, callContext) => {
+					runs++;
+					if (runs > 1) return { output: [] };
+					started.resolve();
+					return aborted(callContext.abortSignal!);
+				},
+				{ replay: "safe" },
+			);
+			addTool(setup.registry, a);
+			addTool(
+				setup.registry,
+				tool("ghost", async () => ({ output: [{ type: "text", text: "ran" }] })),
+			);
+			setup.faux.setResponses([calls(["a", {}, "c1"], ["ghost", {}, "c2"]), DONE]);
+			let opened = await open(path, setup);
+			let root = opened.root;
+			// `ghost` is registered, but not offered to this request.
+			await root.configure({ tools: [a] }, context);
+			const id = (await root.submit({ type: "input", content: "go" }, context)).id;
+			await started.promise;
+			const live = (await opened.harness.snapshot(LiveDoc, ROOT_CONVERSATION_ID, context))!;
+			const generation = live.run!.taskId;
+			expect(live.tools?.map((slot) => [slot.callId, slot.unoffered])).toEqual([
+				["c1", undefined],
+				["c2", true],
+			]);
+			expect((await opened.harness.getTask(generation, context))?.version).toBe(2);
+			// The tools are offered when the round goes on: only the flag keeps `ghost` from running.
+			await root.configure({ tools: null }, context);
+			await opened.harness.close(context);
+			if (version === 1) {
+				const storage = await openNodeSqliteStorage(path);
+				const record = (await storage.task(generation, context))!;
+				await storage.commit([{ type: "task", value: { ...record, version: 1 } }], () => {}, context);
+				await storage.close(context);
+			}
+
+			opened = await open(path, setup);
+			root = opened.root;
+			expect((await (await opened.harness.submission(id, context))!.wait(context)).status).toBe("done");
+			expect((await opened.harness.getTask(generation, context))?.version).toBe(2);
+			const entries = await allEntries(root);
+			expect(await diagnosticsOf(entries, "c2")).toEqual(["tool_unavailable"]);
+			expect(text(results(entries).get("c2"))).not.toContain("ran");
+			await opened.harness.close(context);
+		}
+	});
+
+	// #11043
+	it("settle unavailable, not aborted, when their sequential round is aborted before they start", async () => {
+		const setup = chatSetup();
+		setup.settings.toolExecution = "sequential";
+		const started = deferred();
+		addTool(
+			setup.registry,
+			tool("wait", async (_args, _api, callContext) => {
+				started.resolve();
+				return aborted(callContext.abortSignal!);
+			}),
+		);
+		setup.faux.setResponses([calls(["wait", {}, "c1"], ["ghost", {}, "c2"]), DONE]);
+		const { harness, root } = await openChat(new MemoryStorage(), setup);
+		const submission = await root.submit({ type: "input", content: "go" }, context);
+		await started.promise;
+		await root.abort(context);
+		expect((await submission.wait(context)).status).toBe("unanswered");
+		const entries = await allEntries(root);
+		expect(await diagnosticsOf(entries, "c1")).toEqual(["aborted"]);
+		expect(await diagnosticsOf(entries, "c2")).toEqual(["tool_unavailable"]);
+		await harness.close(context);
 	});
 });

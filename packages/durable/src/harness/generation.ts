@@ -143,8 +143,15 @@ const DEFAULT_POLL_AFTER_MS = 5000;
  */
 export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, GenerationResult, GenerationHooks>({
 	name: "pi.generation",
-	version: 1,
+	version: 2,
 	initial: () => ({ phase: "prepare", attempt: 1 }),
+	// Version 2 leaves calls to tools not offered in a sequential round's `pending`, flagged `unoffered` in their slots.
+	// A version 1 Harness would start their tool tasks unflagged, resolving the name, so it leaves version 2 blocked
+	// instead. A version 1 checkpoint has no such calls and is kept as it is.
+	migrate: (input, checkpoint) => ({
+		input: input as GenerationInput,
+		checkpoint: checkpoint as GenerationCheckpoint,
+	}),
 	phases: {
 		/**
 		 * Render the system prompt and tool loadout and append the positional `pi.system` entries they need, then move to
@@ -307,8 +314,8 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 			// Sequential round: start the next call and wait for it.
 			await runtime.commit(async (tx): Promise<Next> => {
 				const live = await tx.doc(LiveDoc, runtime.conversationId);
-				const taskId = await createToolTask(tx, runtime, assistant, next);
 				const slot = live.tools?.find((slot) => slot.callId === next && slot.taskId === undefined);
+				const taskId = await createToolTask(tx, runtime, assistant, next, slot?.unoffered);
 				if (slot !== undefined) slot.taskId = taskId;
 				const checkpoint: GenerationCheckpoint = {
 					phase: "tools",
@@ -325,7 +332,8 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 		const polled = deferredOf(checkpoint);
 		if (polled !== undefined) await cancelDeferred(runtime, polled, context);
 		const conversationId = runtime.conversationId;
-		// Runs after the round's tool tasks are terminal; calls never started get `aborted` results (spec §8.5).
+		// Runs after the round's tool tasks are terminal; calls never started get `aborted` results (spec §8.5), unoffered
+		// ones `tool_unavailable`.
 		const unstarted =
 			checkpoint.phase === "tools"
 				? await readCalls(runtime, checkpoint.assistant, checkpoint.pending, context)
@@ -334,7 +342,11 @@ export const GenerationTask = defineTask<GenerationInput, GenerationCheckpoint, 
 			const live = await tx.doc(LiveDoc, conversationId);
 			await convertPartial(tx, live, conversationId);
 			for (const call of unstarted) {
-				const result = harnessError("aborted", `Tool ${call.name} was aborted`);
+				// A call its request did not offer could not have run either way.
+				const unoffered = live.tools?.find((slot) => slot.callId === call.id)?.unoffered === true;
+				const result = unoffered
+					? harnessError("tool_unavailable", `Tool ${call.name} is not available`)
+					: harnessError("aborted", `Tool ${call.name} was aborted`);
 				await appendToolResult(tx, conversationId, call, result, { timestamp: runtime.now() });
 			}
 			endRun(tx, live, runtime.taskId, { status: "unanswered", reason: "aborted" });
@@ -355,11 +367,17 @@ async function readCalls(
 	return callIds.flatMap((id) => calls.filter((call) => call.id === id).slice(0, 1));
 }
 
-/** A tool task for call `callId`, owned by the generation. */
-function createToolTask(tx: Tx, runtime: Runtime, assistant: EntryId, callId: string): Promise<TaskId<ToolTaskResult>> {
+/** A tool task for call `callId`, owned by the generation; `unoffered` for a call to a tool its request did not offer. */
+function createToolTask(
+	tx: Tx,
+	runtime: Runtime,
+	assistant: EntryId,
+	callId: string,
+	unoffered: true | undefined,
+): Promise<TaskId<ToolTaskResult>> {
 	return tx.createTask(
 		ToolTask,
-		{ kind: "model", assistant, callId },
+		{ kind: "model", assistant, callId, ...(unoffered === undefined ? {} : { unoffered }) },
 		{ ownership: { kind: "task", taskId: runtime.taskId } },
 	);
 }
@@ -776,9 +794,10 @@ async function answer(runtime: Runtime, message: AssistantMessage, context: Cont
 }
 
 /**
- * Append the tool-calling answer and start its tool round in one commit (spec §8.3). A call to a tool the request did
- * not offer gets its `tool_unavailable` result here; every other call gets a tool task owned by the generation, only the
- * first one now when the round is sequential. The generation then waits for them in its `tools` phase, keeping the run.
+ * Append the tool-calling answer and start its tool round in one commit (spec §8.3). Every call gets a tool task owned by
+ * the generation, in call order, only the first one now when the round is sequential; a call to a tool the request did
+ * not offer is flagged, and its task settles `tool_unavailable`. The generation then waits for them in its `tools`
+ * phase, keeping the run.
  */
 async function startToolRound(
 	runtime: Runtime,
@@ -806,20 +825,15 @@ async function startToolRound(
 		const tools: TaskId<ToolTaskResult>[] = [];
 		const pending: string[] = [];
 		for (const call of calls) {
-			if (!offered.has(call.name)) {
-				const unavailable = harnessError("tool_unavailable", `Tool ${call.name} is not available`);
-				const result = await appendToolResult(tx, conversationId, call, unavailable, { timestamp: runtime.now() });
-				slots.push({ callId: call.id, name: call.name, status: "done", entry: result.id });
-				continue;
-			}
+			const unoffered = offered.has(call.name) ? {} : ({ unoffered: true } as const);
 			if (sequential && tools.length > 0) {
 				pending.push(call.id);
-				slots.push({ callId: call.id, name: call.name, status: "pending" });
+				slots.push({ callId: call.id, name: call.name, status: "pending", ...unoffered });
 				continue;
 			}
-			const taskId = await createToolTask(tx, runtime, entry.id, call.id);
+			const taskId = await createToolTask(tx, runtime, entry.id, call.id, unoffered.unoffered);
 			tools.push(taskId);
-			slots.push({ callId: call.id, name: call.name, taskId, status: "pending" });
+			slots.push({ callId: call.id, name: call.name, taskId, status: "pending", ...unoffered });
 		}
 		delete live.generation;
 		live.tools = slots;
@@ -853,13 +867,13 @@ async function finishToolRound(
 	const slots = (await runtime.snapshot(LiveDoc, conversationId, context))?.tools ?? [];
 	const results = slots.flatMap((slot) => (slot.entry === undefined ? [] : [slot.entry]));
 	await runtime.hooks.each("afterTools", (hook) => hook(assistant, results, runtime, context));
-	// Every call of the round, including those answered without a task, must ask to terminate.
-	const terminate =
-		slots.length > 0 &&
-		slots.every((slot) => slot.taskId !== undefined && controls.get(slot.taskId)?.terminate === true);
-	const added = [...controls.values()].flatMap((control) => control?.addTools ?? []);
+	// In call order, the slots' order; a slot without a task (faulted or orphaned before it got one) has no control.
+	const ordered = slots.map((slot) => (slot.taskId === undefined ? undefined : controls.get(slot.taskId)));
+	// Every call of the round must ask to terminate.
+	const terminate = slots.length > 0 && ordered.every((control) => control?.terminate === true);
+	const added = ordered.flatMap((control) => control?.addTools ?? []);
 	// The last handoff in call order wins.
-	const handoff = [...controls.values()].findLast((control) => control?.handoff !== undefined)?.handoff;
+	const handoff = ordered.findLast((control) => control?.handoff !== undefined)?.handoff;
 	await runtime.commit(async (tx): Promise<Next> => {
 		const boundary = await prepareBoundary(tx, conversationId, runtime.settings);
 		if (added.length > 0) await addTools(tx, conversationId, added);

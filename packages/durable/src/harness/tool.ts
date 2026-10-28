@@ -64,7 +64,13 @@ import { optionalExtension } from "./util.ts";
  * whose call the input carries because no entry holds it.
  */
 export type ToolTaskInput =
-	| { kind: "model"; assistant: EntryId; callId: string }
+	| {
+			kind: "model";
+			assistant: EntryId;
+			callId: string;
+			/** A call to a tool its request did not offer: settles `tool_unavailable` without resolving the name. */
+			unoffered?: true;
+	  }
 	| {
 			kind: "nested";
 			parent: TaskId;
@@ -128,18 +134,21 @@ type Content = (TextContent | ImageContent)[];
  */
 export const ToolTask = defineTask<ToolTaskInput, ToolTaskCheckpoint, ToolTaskResult, ToolHooks>({
 	name: "pi.tool",
-	version: 2,
+	version: 3,
 	initial: () => ({ phase: "call" }),
-	// Version 1 had only model-issued calls.
-	migrate: (input, checkpoint) => ({
-		input: { kind: "model", ...(input as { assistant: EntryId; callId: string }) },
+	// Version 1 had only model-issued calls, without `kind`; version 3 added `unoffered`, absent in version 2 inputs.
+	migrate: (input, checkpoint, fromVersion) => ({
+		input:
+			fromVersion === 1
+				? { kind: "model", ...(input as { assistant: EntryId; callId: string }) }
+				: (input as ToolTaskInput),
 		checkpoint: checkpoint as ToolTaskCheckpoint,
 	}),
 	phases: {
 		call: async (task, runtime, context) => {
 			const call = await readCall(runtime, task.input, context);
 			if (cutOffTooOften(task, runtime)) return endCutOff(runtime, task, call, context);
-			const tool = await resolveTool(runtime, task.input, call.name, context);
+			const tool = isUnoffered(task.input) ? undefined : await resolveTool(runtime, task.input, call.name, context);
 			if (tool === undefined) {
 				const error = harnessError("tool_unavailable", `Tool ${call.name} is not available`);
 				return reject(runtime, task.input, call, undefined, error, context);
@@ -205,9 +214,11 @@ export const ToolTask = defineTask<ToolTaskInput, ToolTaskCheckpoint, ToolTaskRe
 	},
 	abort: async (task, runtime, context) => {
 		const call = await readCall(runtime, task.input, context);
-		// Abandoned after a restart (`TaskOptions.abandonOnRestart`): say whether the call may have run.
-		const [code, message] =
-			task.abortReason !== "restart"
+		// Abandoned after a restart (`TaskOptions.abandonOnRestart`): say whether the call may have run. An unoffered call
+		// could not run in any case, and its result says so.
+		const [code, message] = isUnoffered(task.input)
+			? ["tool_unavailable", `Tool ${call.name} is not available`]
+			: task.abortReason !== "restart"
 				? ["aborted", `Tool ${call.name} was aborted`]
 				: task.state.checkpoint.phase === "execute"
 					? ["interrupted", `Tool ${call.name} was interrupted by a restart and may have partially run`]
@@ -288,14 +299,23 @@ async function settleFromSlot(
 	await settle(runtime, input, call, ending, settled, context);
 }
 
-/** The tool whose output limits bound a hooks' result: the called tool, or none when it, or the agent, fails to resolve. */
+/**
+ * The tool whose output limits bound a hooks' result: the called tool, or none when it, or the agent, fails to resolve,
+ * and for an unoffered call, which never resolves its name.
+ */
 async function toolForLimits(
 	runtime: Runtime,
 	input: ToolTaskInput,
 	name: string,
 	context: Context,
 ): Promise<ToolRegistration | undefined> {
+	if (isUnoffered(input)) return undefined;
 	return resolveTool(runtime, input, name, context).catch(() => undefined);
+}
+
+/** A model-issued call to a tool its request did not offer (spec §8.3). */
+function isUnoffered(input: ToolTaskInput): boolean {
+	return input.kind === "model" && input.unoffered === true;
 }
 
 /** The called tool: among the tools the model is offered for a model-issued call, else among those tools may call. */

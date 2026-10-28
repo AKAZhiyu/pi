@@ -713,7 +713,7 @@ describe("generation", () => {
 				entry: entry.id,
 			});
 			const taskId = await tx.createTask(
-				{ definition: { ...GenerationTask.definition, version: 2 } },
+				{ definition: { ...GenerationTask.definition, version: GenerationTask.definition.version + 1 } },
 				{},
 				{ ownership: { kind: "conversation" }, conversationId: root.id },
 			);

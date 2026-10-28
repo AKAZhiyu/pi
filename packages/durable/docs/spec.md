@@ -3140,7 +3140,7 @@ await conversation.configure({ extensions: { add: [Venv] } }, context);
 |---|---|---|
 | generation `prepare` | agent (tools, sections, model, thinking level), stream options, compaction thresholds for that model | once per request; model, stream options, and offered tools are fixed in the request checkpoint (section 8.3) |
 | every task phase | extension selection for hooks; `runtime.agent()` | at most once per phase handler, at its first hook dispatch or `agent()` call, from that phase's snapshot and the committed `pi.agent`, off the Session line, with the invocation's context; fixed for the rest of the phase |
-| tool task | the implementation of an accepted call | at `call` and `execute`: the name among the phase agent's `tools`, the current selection after the tools filter; no such tool, for example one removed after preparation: `tool_unavailable`. Replay policy on reopen uses the same lookup (section 7.3) |
+| tool task | the implementation of an accepted call | at `call` and `execute`: the name among the phase agent's `tools`, the current selection after the tools filter; no such tool, for example one removed after preparation, or a call flagged `unoffered` (section 8.3): `tool_unavailable`. Replay policy on reopen uses the same lookup (section 7.3) |
 | generation, when a tool round starts | tool execution mode | once per round (section 8.3) |
 | generation, compaction | retry policy | at each attempt's classification |
 | generation, on a context overflow | compaction policy for the request's model | at classification |
@@ -3703,7 +3703,10 @@ A tool call is accepted only if its request offered the tool. Generation checks
 this against the tool set replayed from the committed model context through the
 request's `cutoff`; `beforeRequest` replacements do not change it. It answers a
 call to a tool it did not offer with the `tool_unavailable` result described in
-section 2.2, without a tool task. An agent change after preparation does not
+section 2.2, through a tool task whose input is flagged `unoffered`: the task
+resolves nothing, so even a tool the agent has (a deferred one not loaded yet)
+never runs, and `afterTool` and `control` apply to the result as to any call's.
+An agent change after preparation does not
 affect this check (section 2.2). The tool task resolves the called name among
 the `tools` of the phase's agent resolution, the tools filter applied. It uses
 that implementation
@@ -4256,7 +4259,7 @@ is exported as an `Entry` token.
 | `pi.user` | `[UserMessage]`, timestamp from the Harness clock at admission or placement | submissions, `onYield` continuations |
 | `pi.assistant` | `[AssistantMessage]` with any stop reason | generation |
 | `pi.system` | `[SystemMessage]` with `content: ""` (section 7.4) | generation preparation |
-| `pi.tool-result` | `[ToolResultMessage]` | tool tasks; generation for calls to tools its request did not offer |
+| `pi.tool-result` | `[ToolResultMessage]` | tool tasks; generation for calls an aborted round never started |
 | `pi.reset` | absent, or `[UserMessage]` with the handoff text; always `head: "self"` | `reset()`, generation `tools` phase for `handoff` |
 | `pi.compaction` | `[UserMessage]` with the wrapped summary; `head` is the first kept entry | compaction tasks (section 8.7) |
 
@@ -4308,11 +4311,10 @@ type LiveState = {
   tools?: {
     callId: string;
     name: string;
-    /**
-     * Absent for a call not started yet (sequential round, `pending`) and for a call its request did not offer,
-     * which starts `done` with the `entry` generation wrote.
-     */
+    /** Absent for a call not started yet (sequential round, `pending`). */
     taskId?: TaskId;
+    /** A call to a tool its request did not offer: its task settles `tool_unavailable` without running anything. */
+    unoffered?: true;
     status: "pending" | "running" | "done";
     /** Retained running output and what the bounds dropped. */
     output?: string;
@@ -4396,8 +4398,8 @@ its 64 KiB scan, the commit writes the retained window as one set. Either way
 each commit writes at most one window, and the throttle bounds the rate.
 
 Generation creates `tools` with one `pending` slot per call in the commit that
-appends the tool-calling answer; a call its request did not offer starts `done`
-with its result entry. A tool task sets its slot `running` in its intent commit,
+appends the tool-calling answer; a call its request did not offer is flagged
+`unoffered`. A tool task sets its slot `running` in its intent commit,
 publishes throttled output and details into it with deferred commits (section
 4.1), and in its terminal commit sets
 `done` and `entry` and removes `output`, `droppedBytes`, `droppedLines`,
@@ -4506,7 +4508,11 @@ type GenerationCheckpoint =
 type GenerationResult = { entryId: EntryId };
 ```
 
-`pi.generation` is version 1 and starts at `{ phase: "prepare", attempt: 1 }`.
+`pi.generation` is version 2 and starts at `{ phase: "prepare", attempt: 1 }`;
+`migrate` keeps a version 1 record. Version 2 keeps calls to tools not offered
+in a sequential round's `pending`, flagged `unoffered` in their slots (section
+8.5), which a version 1 Harness would start as tool tasks without the flag, so
+it leaves version 2 blocked (`task_too_old`).
 The run's inputs live in `pi.live.run`, not in the task input.
 
 - `prepare` runs section 7.4 with the phase's agent resolution and resolves
@@ -4630,11 +4636,12 @@ A tool round starts in the commit that appends the tool-calling answer:
 
 1. The offered tools are replayed with pi-ai `getCurrentTools()` from the
    committed model context through `cutoff`: `request` already holds it, and
-   `poll` derives it again. A call to a tool not offered gets its
-   `tool_unavailable` result entry here, without a task.
-2. Every other call gets a `pi.tool` task owned by the generation, with input
-   `{ assistant, callId }`. The round is sequential when the settings'
-   `toolExecution`, read as the round starts, is `sequential` or any called
+   `poll` derives it again.
+2. Every call gets a `pi.tool` task owned by the generation, in call order, with
+   input `{ assistant, callId }`, plus `unoffered: true` (also on its slot) for a
+   call to a tool not offered, which settles `tool_unavailable` without resolving
+   the name (section 8.4). The round is sequential when the settings'
+   `toolExecution`, read as the round starts, is `sequential` or any offered called
    tool, resolved from the phase's agent as the tool task resolves it (section
    7.3), has `executionMode: "sequential"`: then only the first call gets its
    task now and the rest wait in `pending`. Otherwise every call gets its task at
@@ -4664,9 +4671,11 @@ type ToolTaskCheckpoint =
 type ToolTaskResult = { kind: "model"; entryId: EntryId; control?: ToolControl } | { kind: "nested" };
 ```
 
-`pi.tool` is version 2 and starts at `{ phase: "call" }`; `migrate` gives a
-version 1 input `kind: "model"`, and readers treat a terminal result without
-`kind` as a model-issued call's. A model-issued call's input stays small
+`pi.tool` is version 3 and starts at `{ phase: "call" }`; `migrate` gives a
+version 1 input `kind: "model"` and keeps a version 2 input (version 3 added
+`unoffered`), and readers treat a terminal result without `kind` as a
+model-issued call's. A call flagged `unoffered` resolves no tool: `call` settles
+it `tool_unavailable` and the abort handler does too. A model-issued call's input stays small
 because the terminal record keeps it; the call is read from the assistant
 entry. A nested call (section 7.3) carries its call, since no entry holds it,
 and settles differently: its result commit records the result's `usage`
@@ -4767,7 +4776,8 @@ and then commits once:
 
 It completes with `{ entryId }` of the tool-calling answer. Its abort handler
 runs only after its tool tasks are terminal (section 5.5). For every call still
-in `pending`, which never started, it appends an `aborted` error result; a
+in `pending`, which never started, it appends an `aborted` error result
+(`tool_unavailable` for an `unoffered` one), without `afterTool`; a
 started call whose task faulted or was orphaned keeps
 its `done` slot without an entry (section 8.2). It then settles the inputs
 `unanswered` with `aborted`, removes `run`, `generation`, and `tools`, and ends
