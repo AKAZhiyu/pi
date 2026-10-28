@@ -3217,7 +3217,10 @@ interface ToolHooks {
     api: HookApi,
     context: Context,
   ): HookResult<{ readonly arguments?: JsonObject; readonly block?: string }>;
-  /** After execution, before the result is committed; replaces the result. */
+  /**
+   * Before the result is committed; replaces the result. Runs on every result the tool task writes, also the error
+   * results the Harness writes itself (section 8.4), except past the restart limit.
+   */
   afterTool(
     call: ToolHookCall,
     result: ToolExecutionResult,
@@ -3503,7 +3506,10 @@ what programs get. An
 error result the Harness writes itself (unavailable, invalid arguments,
 blocked, interrupted, aborted, abandoned, ended at the restart limit, or a
 scheduler fault) has no
-`structuredOutput`; its diagnostics say what went wrong. A thrown error
+`structuredOutput`; its diagnostics say what went wrong. When an `afterTool`
+hook turns such a result into a success, programs get its bounded output for a
+schema-less tool, or one that did not resolve, and no value for a schema tool;
+the hook's own `structuredOutput` is dropped. A thrown error
 becomes a `tool_error` diagnostic with its message. A nested call whose result breaks this gets an error result
 with an `invalid_structured_output` diagnostic, without the broken value: a
 schema tool's then has no `structuredOutput`, a schema-less tool's its output;
@@ -4679,12 +4685,15 @@ Below, `{ entryId }` is a model-issued call's result.
   same handler executes the tool, runs the `afterTool` chain, and commits the
   result; it builds `api.env` with `HarnessOptions.env` right before executing
   (section 2.2). A tool that does not resolve, invalid arguments, or a block
-  commits the corresponding error result instead, without intent.
+  runs the `afterTool` chain on the corresponding error result and commits it
+  instead, without intent.
 - `execute` is reached only by recovery. When both the stored and the current
   policy, resolved as in `call`, are `safe`, it executes again with the stored arguments,
   without `beforeTool`, and settles like `call`. Otherwise it commits an
   `interrupted` error result from the slot's durable partial output, details, and
-  diagnostics, and ends `failed` with `{ entryId }`.
+  diagnostics, after the `afterTool` chain, and ends `failed` with `{ entryId }`.
+  Either way, a task cut off `settings.restartLimit` times ends with a
+  `restart_limit` result instead (section 5.4), also after the chain.
 - The result commit bounds the content, appends the diagnostics block (section
   7.3), appends one `pi.tool-result` entry with `model: [{ role: "toolResult",
   toolCallId, toolName, content, details, isError, durationMs, timestamp }]` and
@@ -4704,7 +4713,25 @@ Below, `{ entryId }` is a model-issued call's result.
   `completing` with the result entry already written (section 5.5); the
   generation resumes only when the tool task is terminal.
 - The abort handler commits an `aborted` error result from the slot's durable
-  partial output, details, and diagnostics and ends `aborted` with `{ entryId }`.
+  partial output, details, and diagnostics, after the `afterTool` chain, and ends
+  `aborted` with `{ entryId }`. The scheduler faults a task whose abort handler
+  was cut off `restartLimit` times, without a result (section 5.4), so the last
+  attempt it runs, at `restartLimit - 1` restarts, skips the chain.
+- Every result the task writes passes the `afterTool` chain: the slot is read
+  before the result commit, since hooks run outside commits, and does not change
+  while the tool does not run. A result the Harness wrote itself is then bounded
+  with the tool's output limits (the defaults when it did not resolve), gets a
+  truncation diagnostic when that dropped content (a slot's truncation
+  diagnostic stays only while the hooks keep its output), and loses any
+  `structuredOutput`, except that a nested call the chain turns into a success
+  gets its bounded output as value, as a schema-less tool's success does
+  (unless the tool declares a schema, section 7.3); `control` applies only when
+  the task completes. Once the
+  task's restarts exceed `settings.restartLimit`, the chain no longer runs,
+  since it may be what keeps cutting the task off. Results that no tool task
+  writes never pass it: the generation's `aborted` results for calls a
+  sequential round never started (section 8.5), a nested call's fallback result
+  (section 7.3), and a missing result synthesized in context (section 2.1).
 
 ### 8.5 Tool rounds
 
@@ -5916,6 +5943,12 @@ These are contracts, not invitations to add defensive machinery:
   background conversation-owned tasks awaited with `waitForTask()`; a
   non-background one would be aborted by any cascade that reaches its
   conversation.
+- **Hooks in abort handlers:** a tool task's abort handler runs the `afterTool`
+  chain on its `aborted` result, and abort invocations cannot be aborted. A
+  slow hook delays the result, and with it `Conversation.abort()` and
+  `waitForIdle()`; a hanging one holds them until the host restarts, and the
+  handler's last attempt before the restart limit runs without hooks (section
+  8.4).
 - **Hook memo names:** hooks share the asking task's memo namespace with the
   task and other hooks. Prefix memo names.
 - **Long transactions:** an async commit callback holds the Session mutation

@@ -1168,7 +1168,9 @@ describe("tool progress and lifetime", () => {
 			}),
 		);
 		addHooks(setup.registry, ToolTask, {
-			afterTool: async (_call, _result, _api, callContext) => {
+			afterTool: async (_call, result, _api, callContext) => {
+				// The abort handler's result runs the hooks too (#11043); only the executed call's waits.
+				if (result.diagnostics?.some((diagnostic) => diagnostic.code === "aborted")) return undefined;
 				inAfterTool.resolve();
 				await aborted(callContext.abortSignal!);
 				return undefined;

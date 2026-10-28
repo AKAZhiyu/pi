@@ -917,7 +917,18 @@ export interface ToolHooks {
 		api: HookApi,
 		context: Context,
 	): HookResult<{ readonly arguments?: JsonObject; readonly block?: string }>;
-	/** After execution, before the result is committed; replaces the result. */
+	/**
+	 * Before the result is committed; replaces the result. Runs on every result the tool task writes: an executed
+	 * call's, and the error results the Harness writes itself, told apart by their diagnostic code: a tool that does not
+	 * resolve (`tool_unavailable`), invalid arguments (`invalid_arguments`, with `call.arguments` as the model sent
+	 * them), a block (`blocked`), and, rebuilt from the call's partial output, an interruption (`interrupted`), the
+	 * restart limit (`restart_limit`), and an abort (`aborted`, `abandoned`). Once the task was cut off more than
+	 * `settings.restartLimit` times the hooks no longer run, since they may be what cuts it off, nor in the last attempt
+	 * the scheduler gives an abort handler (restarts at the limit minus one). A result's `structuredOutput` is dropped
+	 * when the Harness wrote it (a nested call a hook turns into a success gets the bounded output as a schema-less tool's
+	 * does), and its `control` applies only to a call that completes (not to an interrupted, cut-off, or aborted one).
+	 * An abort's hooks run inside the abort handler, which cannot be aborted: a slow hook delays `Conversation.abort()`.
+	 */
 	afterTool(
 		call: ToolHookCall,
 		result: ToolExecutionResult,

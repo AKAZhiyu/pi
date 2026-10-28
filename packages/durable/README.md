@@ -292,7 +292,7 @@ const lines = defineTool({
 });
 ```
 
-A missing, undeclared, or invalid `structuredOutput` turns a nested call's result into an error result with an `invalid_structured_output` diagnostic; for a call the model made, which never sees it, it is dropped and reported through `onReport`. An error result may omit it, and programs then find its text in a `tool_error` diagnostic; error results the Harness writes itself (blocked, invalid, interrupted, aborted) carry none, and their `diagnostics` say what went wrong. An `afterTool` hook that redacts a schema tool's `output` must redact its `structuredOutput` too. The built-in `bash` returns `{ output, truncated, fullOutputPath?, exitCode }`, where `output` is the retained tail the model sees, read with `api.retainedOutput()`, and answers a nonzero exit with an error result that still carries it.
+A missing, undeclared, or invalid `structuredOutput` turns a nested call's result into an error result with an `invalid_structured_output` diagnostic; for a call the model made, which never sees it, it is dropped and reported through `onReport`. An error result may omit it, and programs then find its text in a `tool_error` diagnostic; error results the Harness writes itself (blocked, invalid, interrupted, aborted) carry none, even when an `afterTool` hook returns one, and their `diagnostics` say what went wrong; one a hook turns into a success gives a schema-less tool's program its output. An `afterTool` hook that redacts a schema tool's `output` must redact its `structuredOutput` too. The built-in `bash` returns `{ output, truncated, fullOutputPath?, exitCode }`, where `output` is the retained tail the model sees, read with `api.retainedOutput()`, and answers a nonzero exit with an error result that still carries it.
 
 A later extension's tool with the same name replaces an earlier one where both are selected, and `wrapTool()` decorates whichever tool won:
 
@@ -630,7 +630,7 @@ const Guard = defineExtension({
 ```
 
 - **Generation:** `beforeRequest` (replace the messages of one request), `afterResponse`, `onYield` (continue the run with another user message), and `afterTools` (runs once a round's tools are done).
-- **Tools:** `beforeTool` (block or rewrite arguments) and `afterTool` (replace the result).
+- **Tools:** `beforeTool` (block or rewrite arguments) and `afterTool` (replace the result). `afterTool` sees every result a tool task writes, also the error results the Harness writes itself (unavailable, invalid, blocked, interrupted, restart limit, aborted), told apart by their diagnostic code; past `settings.restartLimit` it no longer runs. On an abort it runs inside the abort handler, so a slow hook delays `abort()`.
 
 To limit a hook to some conversations, select its extension only there, for example with `configure({ extensions: { add: [Guard] } })`.
 
