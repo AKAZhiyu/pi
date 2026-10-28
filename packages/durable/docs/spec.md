@@ -2144,6 +2144,13 @@ interface TaskRuntime<I, S, R, H extends object> extends DocumentObserver, Docum
   /** Committed entry visible from the task's conversation. */
   entry(id: EntryId, context: Context): Promise<EntryRecord | undefined>;
   entry<D extends JsonValue>(token: Entry<D>, id: EntryId, context: Context): Promise<TypedEntry<D> | undefined>;
+  /** Committed raw history of the task's conversation, fork-aware, as `Conversation.entries()`. */
+  entries(
+    query: Omit<EntryQuery, "conversationId">,
+    limit: number,
+    cursor: Cursor | undefined,
+    context: Context,
+  ): Promise<Page<EntryRecord, Cursor>>;
   /** Committed raw active transcript and model context, optionally cut off at `at`. */
   context(conversationId: ConversationId, context: Context, options?: { readonly at?: EntryId }): Promise<ContextView>;
   /** The Harness clock. */
@@ -3279,11 +3286,20 @@ type HookResult<T> = T | undefined | Promise<T | undefined>;
 interface HookApi extends DocumentReader {
   readonly taskId: TaskId;
   readonly conversationId: ConversationId;
-  /** `HarnessOptions.models`. */
   /** The current `HarnessOptions.models`, read at each access. */
   readonly models: Models;
   memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
   memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
+  /** As `TaskRuntime.entry()` (section 5.1). */
+  entry(id: EntryId, context: Context): Promise<EntryRecord | undefined>;
+  entry<D extends JsonValue>(token: Entry<D>, id: EntryId, context: Context): Promise<TypedEntry<D> | undefined>;
+  /** As `TaskRuntime.entries()` (section 5.1). */
+  entries(
+    query: Omit<EntryQuery, "conversationId">,
+    limit: number,
+    cursor: Cursor | undefined,
+    context: Context,
+  ): Promise<Page<EntryRecord, Cursor>>;
 }
 
 interface GenerationHooks {
@@ -3354,6 +3370,15 @@ composes differently, such as `beforeTool` turning a throw into a block, or stop
 after a first decision, does so inside its own `invoke`. Hooks receive the task's
 runtime as their `HookApi`; hook memos and the task's own memos share one
 namespace, so hook authors prefix their memo names.
+
+Hooks read committed state as it is when they run, off the line, so a hook a
+crash reruns may see more. Entries never change and compaction never removes
+them (section 8.7): a range bounded by entry IDs reads the same before and
+after a compaction and in a rerun. `HookApi` has no `context()`: the active
+transcript changes in the middle of a run, when a compaction summary or a
+handoff's reset lands, so a hook asking what a run did reads its history
+instead. A range also holds entries of others, such as display-only writes,
+compaction summaries, and entries of other tasks; hooks filter by `kind`.
 
 Selection decides which behavior a conversation has; the extension's own
 document holds that behavior's state:

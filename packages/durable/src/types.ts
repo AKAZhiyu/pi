@@ -324,6 +324,17 @@ export interface TaskRuntime<I, S, R, H extends object> extends DocumentObserver
 	entry(id: EntryId, context: Context): Promise<EntryRecord | undefined>;
 	/** Undefined when the entry is absent, not visible, or has another kind. */
 	entry<D extends JsonValue>(token: Entry<D>, id: EntryId, context: Context): Promise<TypedEntry<D> | undefined>;
+	/**
+	 * Committed raw history of the task's conversation, fork-aware, as `Conversation.entries()`: every entry, also those a
+	 * compaction summary or reset left behind. Entries never change, so a range bounded by entry IDs reads the same
+	 * before and after a compaction, and in a rerun after a crash.
+	 */
+	entries(
+		query: Omit<EntryQuery, "conversationId">,
+		limit: number,
+		cursor: Cursor | undefined,
+		context: Context,
+	): Promise<Page<EntryRecord, Cursor>>;
 	/** Committed raw active transcript and model context, optionally cut off at the visible entry `at`. */
 	context(conversationId: ConversationId, context: Context, options?: { readonly at?: EntryId }): Promise<ContextView>;
 	/** The Harness clock. */

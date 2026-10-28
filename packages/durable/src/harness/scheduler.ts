@@ -52,7 +52,7 @@ import type {
 	TaskInspection,
 	Wake,
 } from "./types.ts";
-import { closedError, optionalExtension, scanAll, Waiters } from "./util.ts";
+import { closedError, conversationEntries, optionalExtension, scanAll, Waiters } from "./util.ts";
 
 type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
 /** A record that can still run code: pending, running, waiting, or sleeping. */
@@ -2257,6 +2257,17 @@ export class TaskScheduler {
 					return token === undefined || entry?.kind === token.kind ? entry : undefined;
 				});
 			}) as ErasedRuntime["entry"],
+			entries: (query, limit, cursor, context) =>
+				this.#read(invocation, () =>
+					this.#session.readOnLine(() =>
+						this.#storage.scanEntries(
+							conversationEntries(invocation.conversationId, query),
+							limit,
+							cursor,
+							context,
+						),
+					),
+				),
 			context: (conversationId, context, options) =>
 				this.#read(invocation, async () => {
 					const { view, range } = await readContextFrom(

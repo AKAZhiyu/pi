@@ -25,6 +25,7 @@ import type {
 	Cursor,
 	DocumentObserver,
 	DocumentReader,
+	Entry,
 	EntryDraft,
 	EntryId,
 	EntryQuery,
@@ -44,6 +45,7 @@ import type {
 	TaskRecord,
 	TaskState,
 	Tx,
+	TypedEntry,
 } from "../types.ts";
 import type { TaskGraph, TaskGraphWatch } from "./task-graph.ts";
 import type { UsageState } from "./usage.ts";
@@ -933,7 +935,10 @@ export interface Harness extends Session {
 	observeTaskGraph(observer: Observer<TaskGraph>, context: Context): Promise<Observation<TaskGraph>>;
 }
 
-/** What a hook may use: committed reads and the asking task's memos, which hooks and the task share. */
+/**
+ * What a hook may use: committed reads and the asking task's memos, which hooks and the task share. Hooks run off the
+ * Session line, so reads see what is committed when they run; a hook rerun after a crash may see more.
+ */
 export interface HookApi extends DocumentReader {
 	readonly taskId: TaskId;
 	readonly conversationId: ConversationId;
@@ -941,6 +946,17 @@ export interface HookApi extends DocumentReader {
 	readonly models: Models;
 	memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
 	memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
+	/** Committed entry visible from the task's conversation, as `TaskRuntime.entry()`. */
+	entry(id: EntryId, context: Context): Promise<EntryRecord | undefined>;
+	/** Undefined when the entry is absent, not visible, or has another kind. */
+	entry<D extends JsonValue>(token: Entry<D>, id: EntryId, context: Context): Promise<TypedEntry<D> | undefined>;
+	/** Committed raw history of the task's conversation, as `TaskRuntime.entries()`. */
+	entries(
+		query: Omit<EntryQuery, "conversationId">,
+		limit: number,
+		cursor: Cursor | undefined,
+		context: Context,
+	): Promise<Page<EntryRecord, Cursor>>;
 }
 
 export type HookResult<T> = T | undefined | Promise<T | undefined>;

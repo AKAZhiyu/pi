@@ -74,7 +74,7 @@ import type {
 	Wake,
 } from "./types.ts";
 import { addUsageState, UsageDoc, type UsageState } from "./usage.ts";
-import { scanAll } from "./util.ts";
+import { conversationEntries, scanAll } from "./util.ts";
 import { type ConversationView, ConversationViews, type ConversationWindow } from "./view.ts";
 
 const SCAN_PAGE_SIZE = 256;
@@ -160,13 +160,8 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 		cursor: Cursor | undefined,
 		context: Context,
 	): Promise<Page<EntryRecord, Cursor>> {
-		const bounded: EntryQuery = {
-			conversationId: this.id,
-			...(query.minEntryId === undefined ? {} : { minEntryId: query.minEntryId }),
-			...(query.maxEntryId === undefined ? {} : { maxEntryId: query.maxEntryId }),
-			...(query.order === undefined ? {} : { order: query.order }),
-		};
-		return this.#host.harness.readOnLine(() => this.#host.storage.scanEntries(bounded, limit, cursor, context));
+		const scan = conversationEntries(this.id, query);
+		return this.#host.harness.readOnLine(() => this.#host.storage.scanEntries(scan, limit, cursor, context));
 	}
 
 	fork(at: EntryId, options: ConversationCreateOptions, context: Context): Promise<Conversation> {
