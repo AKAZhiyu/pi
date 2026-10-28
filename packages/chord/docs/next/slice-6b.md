@@ -1,6 +1,6 @@
 # Slice 6b: Durable and jobs on the store (spec)
 
-Status: **draft, open points marked "Decision needed"** (2026-10-27), written by the redesign session after reading
+Status: **decided, ready for the spec reviews** (2026-10-27; D1-D9 decided by the owner), written by the redesign session after reading
 Durable's `Storage` interface (`packages/durable/src/types.ts`), its SQLite storage, schema and migrations, the storage
 conformance suite and benchmark, `session/session.ts`, `session/transaction.ts`, `session/forks.ts`, and Chord v2's
 store engine, applier, schema, commit step and jobs, in full. Durable's memory, JSONL and IndexedDB storages were not
@@ -12,7 +12,7 @@ W1, W12, W13, "Slice 6 first decisions", "Durable observers", "Durable's synchro
 "Failures are watch calls", the "One vocabulary" entries, "The performance and memory bar"; `slice-6a.md` (what 6a
 built); the feature map and the carry-over of `slices.md` (slice 6b); the root `AGENTS.md` "Chord v2 Code Style".
 
-6b puts Durable on the store (`StoreStorage`), follows Durable's views as Chord sources (`durableView`), persists jobs,
+6b puts Durable on the store (`StoreStorage`), follows Durable's views as Chord sources (`self.follow`), persists jobs,
 and extends the applier to every write kind. After 6b a worker has one store: Chord's objects and Durable's Session
 commit through one queue, and a commit of either is one seq in one outbox.
 
@@ -28,7 +28,7 @@ host.serve(Harness, (_, self) => {
   const harness = self.open(async (context) =>
     Harness.open(new StoreStorage(store), { models, registry, … }, context),   // one StoreStorage per store
     (h, _reason, context) => h.close(context));
-  const view = self.follow(...)             // Decision needed (D9): name and shape
+  const view = self.follow((observer, ctx) => harness.value.observeConversation(id, observer, ctx));   // section 2
   return { … };
 });
 
@@ -47,8 +47,8 @@ Durable's `Storage` (types.ts, "Atomic persistence boundary for Session records"
 Durable's Session runs unchanged on it and passes Durable's storage conformance suite
 (`createStorageConformance`), across reopen too.
 
-**Where it lives (D1, owner, 2026-10-27: "they are only used if durable is used"):** `StoreStorage` and
-`durableView` belong to Durable, in its own `src` (Chord v2 is in pi upstream since `93029a0f1`), importing
+**Where it lives (D1, owner, 2026-10-27: "they are only used if durable is used"):** `StoreStorage` belongs to
+Durable (D9 makes `durableView` a generic Chord primitive, `self.follow`), in its own `src` (Chord v2 is in pi upstream since `93029a0f1`), importing
 `@earendil-works/chord/next` (Chord's `./next` package export comes with them). Durable already depends on Chord and
 Chord imports nothing of Durable (S13); Durable's conformance suite runs in Durable's tests and CI.
 
@@ -130,22 +130,33 @@ store usable. 6b changes 6a's step and object failure accordingly.
 A target to measure, as 6a's: an entry append is the `record_ids` put, the entry put, `lastSeq` (plus the outbox); a
 document delta is 6a's three statements. `SqliteStorage` does the same work today (`record_ids`, the row, metadata).
 
-## 2. `durableView`: Durable's views as Chord sources
+## 2. `self.follow`: Durable's views as Chord sources (D9, owner, 2026-10-27)
 
-A Chord source over Durable's synchronous observers (`observeConversation`, `observeTaskGraph`, `observeDoc`;
-decision "Durable's synchronous observers"): `advance(call, ctx)` records the call; on the store, `adopt` runs inside
-the host's batch, so the source is marked in the step and its frame goes out in the flush with the rest of the commit
-(one message per link per commit). On a Durable storage that is not the store (tests, other apps), calls arrive outside
-any batch: the source opens one batch per Durable commit on the next microtask (carry-over). Durable's failures are
-final: `end({ kind: "failed" })` ends the source's watches `failed`; `ended` ends them `ended`. A derive over two
-Durable views of one commit sees both changes in one computation.
+Durable's synchronous observers (`observeConversation`, `observeTaskGraph`, `observeDoc`; decision "Durable's
+synchronous observers") have Chord's watch shapes (`advance(call, ctx)` with a `WatchCall`, `end(end)` with a
+`WatchEnd`, pi `5f312dac4`), so Chord follows them with one generic primitive and Durable needs no adapter:
 
-> **Decision needed (D9): the API.** The carry-over names it `self.follow` (working name): `self.follow(observe)` in
-> a factory, `observe` attaching an observer, returning a `Watchable` usable as a state member, a derive source and an
-> `on` source, detached when the attempt ends. Options: (a) `self.follow((observer, ctx) =>
-> harness.observeConversation(id, observer, ctx, window))`; (b) a plain function `durableView(attach)` returning a
-> native the object opens (`self.open`). Proposal: (a), named `self.follow`: the attempt owns the attachment as it
-> owns a derive.
+```ts
+host.serve(ChatView, ({ conversation }, self) => {
+  const harness = self.get(Harness, {});
+  const view = self.follow((observer, ctx) =>
+    harness.value.observeConversation(conversation, observer, ctx, { min: 50 }));
+  return { view, title: self.derive([view], ([v]) => v.title) };
+});
+```
+
+- `self.follow(attach)` returns a `Watchable`: a state member, a derive source, an `on` source. `attach(observer,
+  ctx)` returns `Promise<{ value, detach }>` (Durable's `Observation`).
+- **Attaching** is that one call during activation: Chord makes the observer, calls `attach`, takes `value` as the
+  source's value (calls arriving before the promise resolves are held and applied after it), and the object goes live.
+  The attempt's end calls `detach()`. An attach that rejects, or resolves `undefined` (`observeDoc` of an absent
+  address), fails the activation like a failed dependency.
+- **Calls:** `advance` records the call. Inside a batch (on the store, Durable's `adopt` runs in the host's batch) the
+  source is marked in the step and its frame goes out in that flush; outside a batch (a Durable storage that is not
+  the store) the source collects the calls and opens one batch on the next microtask. A derive over two views of one
+  Durable commit sees both changes in one computation.
+- **End:** Durable's failures are final: `end({ kind: "failed" })` ends the watches `failed`, `ended` ends them
+  `ended`.
 
 ## 3. Persisted jobs
 
@@ -215,8 +226,8 @@ applying (S17).
   memory (allocation per op, retained after GC) no worse beyond noise; persisted job starts and state changes against
   in-memory ones.
 - **Tests:** Durable's storage conformance suite on `StoreStorage` (memory `:memory:` and across reopen); Durable's
-  Session and harness test files that take a storage, run on `StoreStorage`; durableView (one frame per commit, a
-  derive over two views, outside the store, failure and end); persisted jobs (rerun, abandon, a recorded outcome
+  Session and harness test files that take a storage, run on `StoreStorage`; `self.follow` (one frame per commit, a
+  derive over two views, outside the store, early calls held, failure and end, an absent `observeDoc`); persisted jobs (rerun, abandon, a recorded outcome
   resumes `finish`, restart counting and reset, the limit, abort stored, deferred state, fingerprints); the applier
   (every kind, the outbox replay, refused counts); export and import with Durable records and `rewindable` history;
   GC (observers detached with their attempt).
@@ -225,7 +236,7 @@ applying (S17).
 ## Carry-over taken
 
 From `slices.md` "Slice 6b": persisted jobs (all of it), `StoreStorage` (ids, fork copies, `adopt` in the batch),
-`durableView` (the batch on and off the store, `self.follow`), the applier for batch apply; `job.abort` async and
+the Chord source over Durable's views (`self.follow`, the batch on and off the store), the applier for batch apply; `job.abort` async and
 stored (decision of 2026-10-27).
 
 ## Carry-over left

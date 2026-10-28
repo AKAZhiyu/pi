@@ -1683,6 +1683,14 @@ validation and copies the v2 kernel added around Delta.
   ctx, { persistence: { kind: "deferred", withinMs? } })`, Durable's `CommitPersistence` shape (default 1,000 ms):
   adopted and published at once, stored with the next immediate change, before the outcome is recorded, at close, or
   after `withinMs`; a crash loses what is not stored. Only run state documents for now.
+- **Slice 6b D9: `self.follow(attach)` follows Durable's views (owner, 2026-10-27: "sounds good"):** a generic Chord
+  primitive, no `durableView` module in Durable: `attach(observer, ctx)` returns `Promise<{ value, detach }>`
+  (Durable's `Observation`; its observers have Chord's watch shapes since pi `5f312dac4`). Chord makes the observer,
+  attaches during activation (early calls held, `value` the start value), detaches at the attempt's end; calls inside a
+  batch mark the source in the step, calls outside one are grouped into one batch on the next microtask; a rejected or
+  `undefined` attach fails the activation as a failed dependency; Durable's `failed` end ends the watches `failed`.
+  Returns a `Watchable` (state member, derive source, `on` source). Supersedes the carry-over's `durableView` and D1's
+  `durableView` part.
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

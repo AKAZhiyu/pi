@@ -109,7 +109,7 @@ pattern, no code. Decided cuts are noted where they apply.
 | 10 | the store: backends, tables, query runner, writes, commit queue, outbox, migrations, export/import | 6a |
 | 11 | `Watchable`, watches (Chord's `Watch`), the batch (W1), reentrancy | 1 |
 | 11 | `NativeWatchable`, `self.writable` | 8 |
-| 11 | Durable's views as sources (`durableView` over Durable's `observeXXX`) | 6b |
+| 11 | Durable's views as sources (`self.follow` over Durable's `observeXXX`) | 6b |
 | 12 | `self.derive`, failures per member, lazy when unwatched, `mapShared` | 1 |
 | 12 | container-width benchmark (R24) | 9 |
 | 13 | `self.open`, close reasons, order, restart patterns (R16) | 2 (restarts on reload: 7) |
