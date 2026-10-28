@@ -47,7 +47,7 @@ Order (owner, 2026-10-22: routines and jobs before the store and reload).
 | 4b | **Authority and housekeeping** | revocation, cycles across hosts, `host.references`, `host.activity`, size limits, compression |
 | 5 | **Routines and jobs** | `self.routines`, `self.job` |
 | 6a | **The store** | the store (backends, tables, queries, writes, commit queue, outbox, documents engine, migrations, export), persisted documents, `self.table`, keyed watches and retirement |
-| 6b | **Durable and jobs on the store** | persisted jobs, Durable's `StoreStorage`, the Chord source over Durable's views (`durableView`) |
+| 6b | **Durable and jobs on the store** | persisted jobs, Durable's `StoreStorage`, the Chord source over Durable's views (`self.follow`) |
 | 7 | **Reload and rollout** | plugin loading, staging, swaps and restarts, revisions, `accepts` in use |
 | 8 | **Registries and the harness** | registries, `self.writable`, Durable's harness, `chord(fn, context)` |
 | 9 | **Telemetry** | spans, events, metrics across hosts |
@@ -172,7 +172,7 @@ deleted (the slice's spec and code are the record). Moved here from `carry-over.
 - **`StoreStorage`**: Durable's `Storage` on the store, passing Durable's storage conformance suite (memory and across
   reopen); ids from a `record_ids` table (S10, W13); fork copies resolved before the step (S11); Durable's `adopt` run
   inside the host's batch.
-- **`durableView`**: a Chord source over Durable's synchronous observers (`observeConversation`, `observeTaskGraph`,
+- **`self.follow`** (was `durableView`, decision "Slice 6b D9"): a Chord source over Durable's synchronous observers (`observeConversation`, `observeTaskGraph`,
   `observeDoc`; decision "Durable's synchronous observers"), marked inside Chord's batch in the store and grouped into
   one batch per Durable commit on the next microtask outside it; `self.follow` (working name) and the Durable harness
   carried in a registry entry. The task graph's `blocked` refresh arrives outside any commit.
