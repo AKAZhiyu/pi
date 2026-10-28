@@ -56,18 +56,13 @@ Chord imports nothing of Durable (S13); Durable's conformance suite runs in Dura
 
 Durable's four record tables (conversations, entries, tasks, submissions) and its ID namespace.
 
-> **Decision needed (D2): how Durable's records are stored.**
-> (a) **Declared tables** in the store, written as ordinary `put` writes: `defineTable`s that `StoreStorage` declares
-> for itself (SQL names `"<owner>:<table>"`, e.g. `"session:harness:entries"`), each row the record's indexed columns
-> (`id`, `conversation_id`, `kind`, `status`, …) plus the whole record in a `json(...)` column. The outbox, export,
-> import and the applier handle them as they handle every table; Durable's layout changes later through
-> `evolveTable` (Durable's own SQLite migrations, such as v2's `sleeping`, become table versions). Durable's
-> secondary indexes map to declared indexes; the partial head index becomes an index on `(conversation_id, has_head,
-> id)` (index columns are non-`opt`). Indexed strings that must stay lossless (`kind`, `requestId`, document kinds and
-> keys) keep Durable's JSON encoding in their columns (decision "Text is plain UTF-8").
-> (b) **Internal tables** of `StoreStorage` with write kinds of their own (`durable.record`), which the outbox,
-> export, import and the applier would each learn. More code, a second table mechanism.
-> Proposal: (a).
+**Layout (D2, owner, 2026-10-27: "the whole purpose of this slice"):** declared tables of the store, written as
+ordinary `put` writes: `defineTable`s that `StoreStorage` declares for itself (SQL names `"<owner>:<table>"`, e.g.
+`"session:harness:entries"`), each row the record's indexed columns (`id`, `conversation_id`, `kind`, `status`, …) plus
+the whole record in a `json(...)` column. The outbox, export, import and the applier handle them as every table;
+Durable's layout changes later through `evolveTable`. The partial head index becomes an index on `(conversation_id,
+has_head, id)` (index columns are non-`opt`); indexed strings that must stay lossless (`kind`, `requestId`, document
+kinds and keys) keep Durable's JSON encoding in their columns.
 
 - **Writes:** every `StorageWrite` of a table record becomes a `put` of its row (Durable replaces complete records;
   conversations and entries are immutable and written once). `record_ids` is a declared table too (`id`,

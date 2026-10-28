@@ -1633,6 +1633,12 @@ validation and copies the v2 kernel added around Delta.
   is used"):** in Durable's own `src` (an ordinary pi module, now that Chord v2 is upstream), importing
   `@earendil-works/chord/next` (Chord's `./next` export comes with them). No package cycle: Durable already depends on
   Chord, Chord imports nothing of Durable (S13). Durable's conformance suite runs in Durable's tests and CI.
+- **Slice 6b D2: Durable's records are ordinary declared tables of the store (owner, 2026-10-27: "a, that's the whole
+  purpose of this slice"):** `StoreStorage` declares conversations, entries, tasks, submissions and `record_ids` as
+  `defineTable`s, writes them with `put` (Durable replaces complete records), and reads them with the store's queries;
+  the outbox, export, import, the applier and later `evolveTable` versions handle them as every table. The partial
+  head index becomes an index on `(conversation_id, has_head, id)`; indexed strings that must stay lossless keep
+  Durable's JSON encoding.
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the
