@@ -1659,6 +1659,16 @@ validation and copies the v2 kernel added around Delta.
   step refused fails live (`object_failed`, `broken`: memory and disk disagree); an `int` `CHECK` failure (a plugin's
   value out of range) fails only that transaction (`invalid/args`). `StoreStorage` runs Durable's commit checks in the
   step, where `SqliteStorage` runs them: no special case. Built in 6b (the store's step and object failure).
+- **Slice 6b D5: persisted run records are documents of their object; one harness per store (owner, 2026-10-27:
+  "sure"):** each unsettled run's record is a keyed persisted document of its object in the engine's namespace
+  `chord.jobs` (owner the object's owner string, kind the job name, key the run id); Chord sets that namespace, a plugin
+  never does, so nothing collides; the state document stays an ordinary document of the run; `finish` deletes the
+  record and retires the state (Q9), so only unsettled runs are stored and in memory; activation loads them through the
+  engine's key listing and a load per run (no new engine read). Durable's tables are named under the type name
+  `pi.durable` (`"session:pi.durable:entries"`; type names are unique per app). One `StoreStorage` per store: a second
+  one on the same store is refused (`invalid/args`), as one host per store (rule 7). Rejected on the way: a table per
+  job, a store-wide runs table, `$`-marked internal names (owner: "if our abstractions can't cleanly support this
+  without $ magic, it's a bad abstraction").
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

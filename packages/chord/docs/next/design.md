@@ -1923,12 +1923,12 @@ loop. Chord has no stream type (it would need its own rules for drops, cancellat
   access and execution environments from registry entries, looked up at each use:
 
   ```ts
-  const harness = self.open(async () => Durable.open(storage, {
+  const harness = self.open(async (context) => Harness.open(new StoreStorage(store), {   // the host's store (slice 6b)
     models: () => host.registry(HarnessModels).value,
     env: (target) => host.registry(HarnessEnvironments).value(target.cwd),
     settings: () => currentSettings(),
     registry: durableRegistry(host.registry(HarnessExtensions)),   // a RegistryReader over the composed NativeWatchable
-  }), (h) => h.close());
+  }, context), (h, _reason, context) => h.close(context));
   ```
 
   Durable's `models` and `settings` accept functions (pi `7ec1f648e`). Durable opens with scheduling paused; base code

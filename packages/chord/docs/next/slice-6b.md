@@ -25,8 +25,8 @@ const worker = createHost<P>({ address: Session({ id }), principal, store, onErr
 
 // the core facet: the harness object opens Durable on the same store
 host.serve(Harness, (_, self) => {
-  const durable = self.open(async (context) =>
-    Durable.open(storeStorage(store, { owner: "session:harness" }), { …, paused: true }, context),
+  const harness = self.open(async (context) =>
+    Harness.open(new StoreStorage(store), { models, registry, … }, context),   // one StoreStorage per store
     (h, _reason, context) => h.close(context));
   const view = self.follow(...)             // Decision needed (D9): name and shape
   return { … };
@@ -57,8 +57,9 @@ Chord imports nothing of Durable (S13); Durable's conformance suite runs in Dura
 Durable's four record tables (conversations, entries, tasks, submissions) and its ID namespace.
 
 **Layout (D2, owner, 2026-10-27: "the whole purpose of this slice"):** declared tables of the store, written as
-ordinary `put` writes: `defineTable`s that `StoreStorage` declares for itself (SQL names `"<owner>:<table>"`, e.g.
-`"session:harness:entries"`), each row the record's indexed columns (`id`, `conversation_id`, `kind`, `status`, …) plus
+ordinary `put` writes: `defineTable`s that `StoreStorage` declares for itself under the type name `pi.durable` (SQL names
+`"<host kind>:pi.durable:<table>"`, e.g. `"session:pi.durable:entries"`; type names are unique per app, so no plugin
+table can meet them), each row the record's indexed columns (`id`, `conversation_id`, `kind`, `status`, …) plus
 the whole record in a `json(...)` column. The outbox, export, import and the applier handle them as every table;
 Durable's layout changes later through `evolveTable`. The partial head index becomes an index on `(conversation_id,
 has_head, id)` (index columns are non-`opt`); indexed strings that must stay lossless (`kind`, `requestId`, document
@@ -154,12 +155,13 @@ abort request is persisted; a restart limit; the job fingerprint stored with eve
 
 - **Where records live:**
 
-> **Decision needed (D5).** (a) **Documents of the object:** each run's record is a keyed persisted document of the
-> object (an internal definition per job, key the run id: `{ version, fingerprint, args, key?, phase, outcome?,
-> abort?, restarts, trace? }`), its state document a second keyed document; both written in the transactions that
-> already change them (start, state change, outcome, finish, block, drop), loaded at the object's first activation
-> (all unsettled runs: `running` needs every one). (b) A table per job. Proposal: (a): the records are few, change
-> in the same transactions as today, and reuse persisted documents (versions, checkpoints, export).
+**Where records live (D5, owner, 2026-10-27):** each unsettled run's record is a keyed persisted document of its
+object in the engine's namespace `chord.jobs` (owner the object's owner string, kind the job name, key the run id:
+`{ version, fingerprint, args, key?, phase, outcome?, abort?, restarts, trace? }`); Chord sets that namespace, a plugin
+never does (its documents are always `chord`), so nothing can collide. Its state document stays an ordinary document
+of the run. Both change in the transactions that change them today (start, state change, outcome, finish, block,
+drop); `finish` deletes the record and retires the state in its commit (Q9), so only unsettled runs are stored. At the
+object's first activation the records are loaded through the engine's key listing and a load per run (no new read).
 
 - **Resume at activation:** a run recorded `finishing` resumes `finish` only; a run recorded `running` was cut off by
   a crash: `rerun` invokes `run` again with the stored args and state, `abandon` records `failed { aborted, reason:
