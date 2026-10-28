@@ -1675,6 +1675,10 @@ validation and copies the v2 kernel added around Delta.
   resets the count; at five in a row the run ends `failed { kind: "restart_limit", restarts }` (a new `JobError`),
   `finish` runs, `job_interrupted` is reported. Supersedes design §15's `blocked { restart_limit }` (no parking, as
   Durable since #11139).
+- **Slice 6b D7: `job.abort(id, ctx): Promise<"marked" | "terminal">` (owner, 2026-10-27: "yes"):** Durable's words
+  and behaviour (`abortTask`): a running run's abort is stored and its signal fired, resolving `"marked"` once `run`
+  settled; a finishing run is only marked; a blocked run is dropped (`"marked"`, as Durable's orphan); no unsettled run
+  with that id resolves `"terminal"` (Chord keeps no settled runs, Q9). Supersedes "job.abort stays until 6b".
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

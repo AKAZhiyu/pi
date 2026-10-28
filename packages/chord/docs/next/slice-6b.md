@@ -179,11 +179,12 @@ reload) writes its stopped runs back so the next activation counts nothing (Dura
 
 - **Abort** (owner, 2026-10-27: async and stored in 6b):
 
-> **Decision needed (D7): `job.abort(id, ctx)`'s result.** Cases: a running run (its signal fires, the abort is
-> stored so a rerun after a crash does not run again but finishes `aborted`); a finishing run (its outcome is decided,
-> nothing to do); a blocked run (dropped); an unknown or settled id. Durable's `abortTask` returns `"marked" |
-> "terminal"` and throws for an unknown id. Proposal: `Promise<"marked" | "finishing" | "dropped">`, rejecting `gone`
-> for an unknown or settled id (as `outcome(id)` does).
+**`job.abort(id, ctx): Promise<"marked" | "terminal">` (D7, owner, 2026-10-27), Durable's words and behaviour:**
+a running run gets its abort stored (a rerun after a crash then finishes `aborted` instead of running again) and its
+signal fired, and `abort` resolves `"marked"` once `run` settled (as `abortTask` joins the run); a finishing run is only
+marked (`"marked"`, as Durable's `completing`); a blocked run is dropped at once (`"marked"`, as Durable's orphan); an id
+with no unsettled run resolves `"terminal"` (Chord keeps no settled runs, Q9, so a settled and an unknown id are the
+same; Durable throws for an unknown one).
 
 - **Deferred state persistence:**
 

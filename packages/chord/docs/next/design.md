@@ -1371,7 +1371,7 @@ host.serve(ChatStore, ({ conversation }, self) => {          // local: no princi
   slice 6. `self.job(Job, { run, finish? })` is declared in an object's factory (not in a facet) and returns the job
   handle: `start(args, ctx, { key? })` (a `Run { id, outcome(ctx) }` after the commit), `tx.start(job, args, { key? })`
   inside `self.tx` (a `Run` handle at once, whose `outcome` rejects if the transaction is discarded), `outcome(id, ctx)`
-  (unsettled runs only), `abort(id)` (async and stored with persisted jobs, slice 6b) and `running`.
+  (unsettled runs only), `abort(id, ctx)` (`"marked" | "terminal"`, as Durable's `abortTask`: stored, resolves once `run` settled; slice 6b) and `running`.
 - **1. Intent:** one transaction on the owner's line. Arguments are checked against `args` (closed schema, like
   method arguments). Dedupe first: a run with the same `key` that is not settled is returned as it is (the run whose
   `finish` this transaction is never counts, so `finish` can start the same job again with the same key). Then the
