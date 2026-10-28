@@ -1622,10 +1622,17 @@ validation and copies the v2 kernel added around Delta.
   throwing Chord's codes (6b), one retirement value ("One retirement mechanism" (2) stands).
   Added (owner, 2026-10-27, "lgtm"): Durable's `SessionEnd` and the `ReportFrom` argument of `runtime.report()` are
   tagged by `kind` too (neither is stored).
+- **Chord v2 and its docs live in pi upstream (owner, 2026-10-27: "we can put chord v2 in upstream", "the docs can
+  all be public, and in upstream"):** `packages/chord/src/next`, `src/next-node`, `test/next`, `test/next-node` and
+  `docs/next` moved to pi `main` (`93029a0f1`), not exported until v2 has an entry point (experimental, noted in the
+  changelog); the decision log moved from `apps/p2/docs/redesign-decisions.md` to `packages/chord/docs/next/decisions.md`;
+  the root `AGENTS.md` carries the "Chord v2 Code Style" section. From now on every slice and every design doc change
+  goes to pi first (worktree of `upstream/main`, check, tests, push, CI, merge into `private`); only `apps/` stays
+  private.
 - **Slice 6b D1: `StoreStorage` and `durableView` live in Durable (owner, 2026-10-27: "they are only used if durable
-  is used"):** in `packages/durable/src/next/`, private-only like `packages/chord/src/next`, importing
-  `@earendil-works/chord/next` (Chord's `./next` export returns, private-only). No package cycle: Durable already
-  depends on Chord, Chord imports nothing of Durable (S13). The folder goes upstream with Chord v2.
+  is used"):** in Durable's own `src` (an ordinary pi module, now that Chord v2 is upstream), importing
+  `@earendil-works/chord/next` (Chord's `./next` export comes with them). No package cycle: Durable already depends on
+  Chord, Chord imports nothing of Durable (S13). Durable's conformance suite runs in Durable's tests and CI.
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

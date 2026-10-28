@@ -48,10 +48,9 @@ Durable's Session runs unchanged on it and passes Durable's storage conformance 
 (`createStorageConformance`), across reopen too.
 
 **Where it lives (D1, owner, 2026-10-27: "they are only used if durable is used"):** `StoreStorage` and
-`durableView` belong to Durable: `packages/durable/src/next/`, private-only like `packages/chord/src/next`, importing
-`@earendil-works/chord/next` (Chord's `./next` package export, private-only, returns for it). Durable already depends
-on Chord and Chord imports nothing of Durable (S13); Durable's conformance suite runs in Durable's tests; the folder
-goes upstream with Chord v2.
+`durableView` belong to Durable, in its own `src` (Chord v2 is in pi upstream since `93029a0f1`), importing
+`@earendil-works/chord/next` (Chord's `./next` package export comes with them). Durable already depends on Chord and
+Chord imports nothing of Durable (S13); Durable's conformance suite runs in Durable's tests and CI.
 
 ### 1.1 Records
 
