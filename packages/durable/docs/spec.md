@@ -548,6 +548,8 @@ type AgentState = {
   instructions?: string;
   /** Directory within the environment's file system, passed to `HarnessOptions.env`. */
   cwd?: string;
+  /** Tool rounds one run takes at most (section 8.5); an integer, `1` or more; unset, no limit. */
+  maxTurns?: number;
 };
 
 /** Built-in rewindable agent document; see below. */
@@ -568,6 +570,8 @@ type AgentChange = {
     | null;
   readonly instructions?: string | null;
   readonly cwd?: string | null;
+  /** `configure()` throws a `RangeError` unless it is an integer `1` or more, or `null`. */
+  readonly maxTurns?: number | null;
 };
 
 /** One change in any commit. A given field replaces the stored one; `null` clears it; `undefined` changes nothing. */
@@ -588,6 +592,7 @@ type Agent<Tool extends ToolRegistration = ToolRegistration> = {
   readonly sections: readonly PromptSection<Tool>[];
   readonly instructions?: string;
   readonly cwd?: string;
+  readonly maxTurns?: number;
 };
 
 /** Entry whose `data` has type `D`; `never` means the kind carries no data. */
@@ -2837,6 +2842,7 @@ Admission and terminal transitions:
 | boundary places write | `done`, with entry | append entry |
 | run answers | input or continue `done`, with required answer entry | remove `run`, or hand it to a successor |
 | run fails or its task aborts | input `unanswered`, with reason | remove `run`; inbox per `afterFailedRun` below |
+| tool round reaches `maxTurns` | input `unanswered`, reason `turn_limit` | as a failed run |
 | withdraw queued item | `unanswered`, reason `aborted` | remove inbox item |
 | stale head write | `unanswered`, reason `stale` | remove inbox item |
 
@@ -2864,7 +2870,8 @@ run started in its commit kept) settles `nothing_to_answer`. Each continue start
 a run with its own turn budget.
 
 `settings.afterFailedRun` decides what a run that fails with `model_error`,
-`no_model`, `interrupted`, `restart_limit`, or `nothing_to_answer` does with the inputs queued behind it, in the commit that settles its
+`no_model`, `interrupted`, `restart_limit`, `nothing_to_answer`, or
+`turn_limit` does with the inputs queued behind it, in the commit that settles its
 own inputs: `keep` (the default) leaves them queued; `continue` applies the
 final boundary, so the next run starts with them, as after an answer;
 `withdraw` settles them `unanswered` with reason `run_failed`, keeping queued
@@ -4326,8 +4333,11 @@ messages out of later requests, so no separate usage or notice kind exists.
 
 ```ts
 type LiveState = {
-  /** Run control (section 6); present exactly while the conversation is busy. */
-  run?: { taskId: TaskId; inputs: SubmissionId[] };
+  /**
+   * Run control (section 6); present exactly while the conversation is busy. `turns` counts the run's tool rounds,
+   * which `AgentState.maxTurns` bounds (section 8.5); an `onYield` continuation starts it over (section 8.3).
+   */
+  run?: { taskId: TaskId; inputs: SubmissionId[]; turns: number };
   /** Presentation of the current generation attempt. */
   generation?: {
     attempt: number;
@@ -4410,10 +4420,12 @@ type RunFailure = {
     | "orphaned"
     | "interrupted"
     | "restart_limit"
-    | "nothing_to_answer";
+    | "nothing_to_answer"
+    | "turn_limit";
   /**
    * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
-   * the task could not run (`missing_task`, `task_too_old`, `migration_failed`).
+   * the task could not run (`missing_task`, `task_too_old`, `migration_failed`); `interrupted` and `restart_limit`:
+   * what was cut off, and how often; `turn_limit`: the tool rounds the run took, `"1 turn"` or `"N turns"`.
    */
   detail?: string;
 };
@@ -4444,7 +4456,7 @@ type CompactionStatus = {
 | version | `2` |
 | scope/history/fork | conversation, `latest`, `initial` |
 | `initial()` | `{}` |
-| `migrate()` | from version 1: `reason` of each `compactions` status and of `compactionFailure` renamed `trigger` (section 3.6) |
+| `migrate()` | from version 1: `reason` of each `compactions` status and of `compactionFailure` renamed `trigger`, and `run.turns` set to `0` (section 3.6) |
 | checkpoint | complete base whenever nothing runs: `generation` absent and no `running` tool or nested slot |
 | view mount | `docs["pi.live"]` |
 | created | with every Harness conversation (section 2.2) |
@@ -4504,6 +4516,7 @@ that settles its inputs `unanswered`:
 | `interrupted` | the host stopped while the model was answering, with no retry left (section 8.3); `detail` names the attempt | `interrupted` with the text |
 | `restart_limit` | its generation was cut off `restartLimit` times in a row (section 5.4), also while an interrupted request was charged; `detail` says in which phase | `restart_limit` with the text |
 | `nothing_to_answer` | its generation found a context that does not end in a user message or tool results, system messages aside, such as a continue after an answer (section 8.3); no `detail` | `nothing_to_answer` |
+| `turn_limit` | a tool round reached the conversation's `maxTurns` and ran its tools (section 8.5); `detail` is the run's count, `"1 turn"` or `"N turns"` | `turn_limit` with the count |
 
 The next commit that starts a run removes it. A run started in the same commit,
 the queue's next run under `afterFailedRun: "continue"` (section 6) or after a
@@ -4664,7 +4677,11 @@ The run's inputs live in `pi.live.run`, not in the task input.
     `{ continue }` wins. The commit appends the answer and applies the final
     boundary (section 6). With a continuation and no selected user item or
     reset, it appends a `pi.user` entry with the continuation content, creates a
-    successor generation, and hands it `pi.live.run`, keeping the inputs open.
+    successor generation, and hands it `pi.live.run`, keeping the inputs open and
+    setting its `turns` to `0`: each stretch a continuation starts gets the whole
+    turn budget, and bounding `onYield` loops is the extension's job (it reads
+    `pi.live.run.turns` and `pi.agent.maxTurns` with `api.snapshot`). The chain runs
+    whatever the count.
     Otherwise it settles the run's inputs `done`, removes `run` and
     `generation`, and starts a successor run for the selected user items, if
     any; a dropped continuation is not retried. Both complete with
@@ -4720,12 +4737,12 @@ A tool round starts in the commit that appends the tool-calling answer:
    `pending` shrinks.
 3. The generation commits `waiting` on its tool tasks with `allSettled` and the
    `tools` checkpoint (section 8.5); `pi.live.run` stays with it.
-4. `pi.live.tools` receives the round's slots (section 8.2), and `generation` is
-   removed.
+4. `pi.live.tools` receives the round's slots (section 8.2), `generation` is
+   removed, and `pi.live.run.turns` grows by one.
 
 Input and continue submissions settle `unanswered` with one of these reasons:
 `no_model`, `model_error` (detail: provider error text), `nothing_to_answer`,
-`aborted`, `faulted` (detail: error message), or an orphaning blocked reason
+`turn_limit` (detail: the turn count, section 8.5), `aborted`, `faulted` (detail: error message), or an orphaning blocked reason
 (section 5.4). Fault and orphan
 settlement convert a committed partial into an aborted `pi.assistant` entry,
 like the abort handler.
@@ -4837,6 +4854,12 @@ and then commits once:
 - When every result of the round requests `terminate`, it settles the run's
   inputs `done` with the tool-calling answer, removes `run` and `tools`, and
   applies the final boundary.
+- Otherwise, when the run's `turns`, counted in the commit that started the
+  round, reached the phase agent's `maxTurns`, the run ends as a failed run
+  (section 6): its inputs settle `unanswered` with `turn_limit` (detail: the
+  count), `runFailure` records it, `afterFailedRun` decides the queued items, and
+  the generation still completes with `{ entryId }`. A continue resumes it on the
+  round's results (section 6).
 - Otherwise it removes `tools` and applies the `postTools` boundary. When that
   boundary placed a queued reset, which wins over a handoff written before it,
   the run's inputs settle `unanswered` with `reset` and selected user items

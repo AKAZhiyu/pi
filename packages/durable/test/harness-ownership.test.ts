@@ -174,7 +174,7 @@ async function waitUntil(check: () => Promise<boolean>): Promise<void> {
 /** Mark a conversation busy with `task` standing in for its run, so submissions queue. */
 async function busy(conversation: Conversation, task: TaskId): Promise<void> {
 	await conversation.commit(async (tx) => {
-		(await tx.doc(LiveDoc, conversation.id)).run = { taskId: task, inputs: [] };
+		(await tx.doc(LiveDoc, conversation.id)).run = { taskId: task, inputs: [], turns: 0 };
 	}, context);
 }
 

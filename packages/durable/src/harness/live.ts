@@ -102,7 +102,8 @@ export type CompactionFailure = {
  * - `restart_limit`: the run's generation was cut off `settings.restartLimit` times in a row; a request or poll it was
  *   cut off during counts as a failed attempt first, so this ends one whose charge itself keeps failing;
  * - `nothing_to_answer`: the context did not end in a user message or tool results (empty, or ending in an answer), so
- *   no request was sent, as for a continue after an answer.
+ *   no request was sent, as for a continue after an answer;
+ * - `turn_limit`: a tool round reached the conversation's `maxTurns`; a continue resumes on its results.
  */
 export type RunFailureReason =
 	| "model_error"
@@ -113,7 +114,8 @@ export type RunFailureReason =
 	| "orphaned"
 	| "interrupted"
 	| "restart_limit"
-	| "nothing_to_answer";
+	| "nothing_to_answer"
+	| "turn_limit";
 
 /** The newest run that ended without an answer (spec §8.2). */
 export type RunFailure = {
@@ -125,15 +127,18 @@ export type RunFailure = {
 	/**
 	 * `model_error`: the error text; `no_model`: which model is missing; `faulted`: the error message; `orphaned`: why
 	 * the task could not run (`missing_task`, `task_too_old`, `migration_failed`); `interrupted` and `restart_limit`: what
-	 * was cut off, and how often.
+	 * was cut off, and how often; `turn_limit`: the tool rounds the run took, `"1 turn"` or `"N turns"`.
 	 */
 	detail?: string;
 };
 
 /** Built-in live conversation state: run control and presentation of the current generation and tool round. */
 export type LiveState = {
-	/** Run control: the task that settles the run's inputs, and those inputs; present exactly while busy. */
-	run?: { taskId: TaskId; inputs: SubmissionId[] };
+	/**
+	 * Run control: the task that settles the run's inputs, those inputs, and the run's tool rounds so far, which
+	 * `AgentState.maxTurns` bounds (an `onYield` continuation starts the count over); present exactly while busy.
+	 */
+	run?: { taskId: TaskId; inputs: SubmissionId[]; turns: number };
 	/** Presentation of the current generation attempt. */
 	generation?: {
 		attempt: number;
@@ -173,12 +178,14 @@ export const LiveDoc = defineDoc<LiveState>({
 	history: "latest",
 	fork: "initial",
 	initial: () => ({}),
-	// Version 1 named a compaction's trigger `reason`, in `compactions` and `compactionFailure`.
+	// Version 1 named a compaction's trigger `reason`, in `compactions` and `compactionFailure`, and had no `run.turns`:
+	// a run in flight across the upgrade counts its turns from 0.
 	migrate: (value) => {
-		const live = value as { compactions?: JsonObject[]; compactionFailure?: JsonObject };
-		const { compactions, compactionFailure } = live;
+		const live = value as { run?: JsonObject; compactions?: JsonObject[]; compactionFailure?: JsonObject };
+		const { run, compactions, compactionFailure } = live;
 		return {
 			...value,
+			...(run === undefined ? {} : { run: { ...run, turns: 0 } }),
 			...(compactions === undefined ? {} : { compactions: compactions.map(renameReason) }),
 			...(compactionFailure === undefined ? {} : { compactionFailure: renameReason(compactionFailure) }),
 		} as LiveState;

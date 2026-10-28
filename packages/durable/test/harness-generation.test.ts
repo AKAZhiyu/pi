@@ -717,7 +717,7 @@ describe("generation", () => {
 				{},
 				{ ownership: { kind: "conversation" }, conversationId: root.id },
 			);
-			(await tx.doc(LiveDoc, root.id)).run = { taskId, inputs: [submission.id] };
+			(await tx.doc(LiveDoc, root.id)).run = { taskId, inputs: [submission.id], turns: 0 };
 			return { taskId, submissionId: submission.id };
 		}, context);
 		harness.resume();

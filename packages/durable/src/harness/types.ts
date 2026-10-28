@@ -455,6 +455,11 @@ export type AgentState = {
 	instructions?: string;
 	/** Directory within the environment's file system, passed to `HarnessOptions.env`. */
 	cwd?: string;
+	/**
+	 * Tool rounds one run takes at most (`pi.live.run.turns`): the round that reaches it runs its tools, then the run ends
+	 * `unanswered` with `turn_limit`. An integer, `1` or more; unset, no limit. Task-owned children and forks inherit it.
+	 */
+	maxTurns?: number;
 };
 
 /** A change to `pi.agent`: a given field replaces the stored one, `null` clears it, `undefined` changes nothing. */
@@ -473,6 +478,8 @@ export type AgentChange = {
 		| null;
 	readonly instructions?: string | null;
 	readonly cwd?: string | null;
+	/** `configure()` throws a `RangeError` unless it is an integer `1` or more (or `null`). */
+	readonly maxTurns?: number | null;
 };
 
 /** A conversation's agent resolved against a registry snapshot and the settings. */
@@ -490,6 +497,11 @@ export type Agent<Tool extends ToolRegistration = ToolRegistration> = {
 	readonly sections: readonly PromptSection<Tool>[];
 	readonly instructions?: string;
 	readonly cwd?: string;
+	/**
+	 * Tool rounds one run takes at most (`pi.live.run.turns`): the round that reaches it runs its tools, then the run ends
+	 * `unanswered` with `turn_limit`. An integer, `1` or more; unset, no limit. Task-owned children and forks inherit it.
+	 */
+	readonly maxTurns?: number;
 };
 
 /**
@@ -596,8 +608,8 @@ export type HarnessSettings = {
 	 */
 	readonly documentRetentionMs?: number;
 	/**
-	 * What a run that fails (`model_error`, `no_model`, `interrupted`, `restart_limit`, `nothing_to_answer`) does with the
-	 * inputs queued behind it: `keep` leaves them queued until the next input or queued write, `continue` starts the
+	 * What a run that fails (`model_error`, `no_model`, `interrupted`, `restart_limit`, `nothing_to_answer`,
+	 * `turn_limit`) does with the inputs queued behind it: `keep` leaves them queued until the next input or queued write, `continue` starts the
 	 * next run with them, as an answer would, and `withdraw` settles them `unanswered` with reason `run_failed`. Default
 	 * `keep`.
 	 */
@@ -613,7 +625,10 @@ export type HarnessSettings = {
 	readonly restartLimit?: number;
 };
 
-/** What a failed run does with the inputs queued behind it (`HarnessSettings.afterFailedRun`). */
+/**
+ * What a failed run does with the inputs queued behind it (`HarnessSettings.afterFailedRun`): a run that ends with
+ * `model_error`, `no_model`, `interrupted`, `restart_limit`, `nothing_to_answer`, or `turn_limit`.
+ */
 export type AfterFailedRun = "keep" | "continue" | "withdraw";
 
 /** Resolved settings: every field over its built-in default, object fields merged. */

@@ -217,7 +217,7 @@ The default `setTimer` declines the timers that only free memory in Workers, so 
 
 **Reports.** `onReport(report)` gets one `Report`: the `error` and what happened in `report.kind`: `storage_failed` for the error that failed the Harness (a Storage error, often a platform reset); `task_faulted`, `task_interrupted` (crashes ended it, with `report.reason` and `report.restarts`), `migration_failed`, `task_outdated` (`reason` `missing_task`, `task_too_old`, or `migration_failed`, the words a blocked task shows), or `task_error` for a task, with `report.task` (its `id`, `kind`, and `conversationId`) and the extension that installed it in `report.extension`; `extension_error` for hooks, sections, wrappers, and tools, with the extension's name; `host_error` for a host callback, named in `report.callback`; and `listener_error`. A host can feed `task_faulted` reports of one kind to its own breaker.
 
-**Queued inputs after a failed run.** A run that fails with a model error, a missing model, or crashes (`interrupted`, `restart_limit`) leaves the inputs queued behind it waiting until the next input arrives. `settings.afterFailedRun` changes that: `continue` starts the next run with them, as after an answer, and `withdraw` settles them `unanswered` with reason `run_failed`.
+**Queued inputs after a failed run.** A run that fails with a model error, a missing model, nothing to answer, its turn limit, or crashes (`interrupted`, `restart_limit`) leaves the inputs queued behind it waiting until the next input arrives. `settings.afterFailedRun` changes that: `continue` starts the next run with them, as after an answer, and `withdraw` settles them `unanswered` with reason `run_failed`.
 
 **Blocked tasks.** Tasks blocked on a missing or unmigratable definition show their reason in the task graph too, and a registry change that unblocks them makes `onWake` report the Session active, so a host need not poll them.
 
@@ -391,6 +391,7 @@ await root.configure(
 		modelTools: [readTool], // of those, offer the model only read; tools may still call bash
 		instructions: "Only read; never edit files.",
 		cwd: "/work/repo",
+		maxTurns: 50, // tool rounds one run takes at most; unset: no limit
 	},
 	context,
 );
@@ -399,6 +400,8 @@ const agent = await root.agent(context); // resolved: model, extensions, tools, 
 ```
 
 Extensions and tools are passed as objects and stored by name, so a stored name outlives its code: after an extension is uninstalled, conversations that select it just stop getting it until it is installed again. `createConversation()`, `fork()`, and `root()` take the same change as `agent`. A task-owned conversation, such as a subagent's, starts as a copy of its owner's conversation's agent. A fork starts with the agent its parent had at the fork entry. The model, prompt, and offered tools of a request are fixed when it is prepared; a change applies from the next request. Tool calls and hooks use the agent as their task phase resolves it, and the environment is built from the current `cwd` at each use, so a `cwd` or extension change can reach calls the model already made.
+
+**Turn limits.** `maxTurns` bounds the tool rounds one run takes: the round that reaches it still runs its tools, then the run ends `unanswered` with `turn_limit`, like a failed run (`runFailure`, and `settings.afterFailedRun` decides the inputs queued behind it). An answer always ends the run, so it is never cut off. The count is `docs["pi.live"].run.turns`; it survives restarts, and every run starts at 0, also one a continue starts (see [Busy Conversations](#busy-conversations)), so a host or tool that continues automatically gets a fresh budget each time and must bound that itself. An `onYield` continuation also starts the count over: an extension that keeps a run going bounds its own loop, reading `pi.live.run.turns` and `pi.agent.maxTurns` with `api.snapshot`. `configure()` throws a `RangeError` for anything but an integer 1 or more (or `null`); a change applies at the end of the current round, and children and forks inherit it like the rest of the agent.
 
 ## Settings
 
@@ -542,7 +545,7 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 
 If a run fails, queued items stay in the inbox until the next input, queued write, or continue places them, oldest first.
 
-When a run ends without an answer, `docs["pi.live"].runFailure` says why until the next run starts: `model_error` and `no_model` (with the error text or the missing model in `detail`), `aborted`, `reset`, `interrupted` (the host stopped while the model answered, with no retry left), `faulted`, `orphaned`, and `restart_limit` (the run's task could not go on), or `nothing_to_answer` (a continue, below, found nothing to answer). The run's inputs are in it too, settled `unanswered`; the settlement's reason is the same, except that an orphaned run's inputs carry why it was orphaned (`missing_task`, `task_too_old`, `migration_failed`) and `no_model` has no `detail` there (spec §8.2).
+When a run ends without an answer, `docs["pi.live"].runFailure` says why until the next run starts: `model_error` and `no_model` (with the error text or the missing model in `detail`), `aborted`, `reset`, `interrupted` (the host stopped while the model answered, with no retry left), `faulted`, `orphaned`, and `restart_limit` (the run's task could not go on), `turn_limit` (a tool round reached the conversation's `maxTurns`), or `nothing_to_answer` (a continue, below, found nothing to answer). The run's inputs are in it too, settled `unanswered`; the settlement's reason is the same, except that an orphaned run's inputs carry why it was orphaned (`missing_task`, `task_too_old`, `migration_failed`) and `no_model` has no `detail` there (spec §8.2).
 
 To resume such a run without typing a message, submit a continue. It starts a run on the context as it is, so the model answers the user message or tool results the stopped run left:
 

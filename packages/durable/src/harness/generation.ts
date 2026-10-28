@@ -29,7 +29,7 @@ import type {
 } from "../types.ts";
 import { addTools, sectionExtension } from "./agent.ts";
 import { compactionPolicy, createCompaction, estimateContext, selectCut } from "./compaction.ts";
-import { applyBoundary, type Boundary, prepareBoundary, withdrawQueuedInputs } from "./inbox.ts";
+import { applyBoundary, type Boundary, hasQueuedReset, prepareBoundary, withdrawQueuedInputs } from "./inbox.ts";
 import {
 	cutOffCount,
 	cutOffTooOften,
@@ -796,10 +796,13 @@ async function answer(runtime: Runtime, message: AssistantMessage, context: Cont
 		const live = await tx.doc(LiveDoc, conversationId);
 		const entry = await appendAssistant(tx, conversationId, message);
 		const result: Next = { status: "terminal", outcome: { status: "completed", result: { entryId: entry.id } } };
-		const { users, reset } = await applyBoundary(tx, boundary, "final", runtime.now());
-		if (continuation !== undefined && users.length === 0 && !reset) {
-			const user = { role: "user", content: continuation, timestamp: runtime.now() } as const;
+		const continues = takesContinuation(continuation, boundary) ? continuation : undefined;
+		const { users } = await applyBoundary(tx, boundary, "final", runtime.now());
+		if (continues !== undefined) {
+			const user = { role: "user", content: continues, timestamp: runtime.now() } as const;
 			await tx.appendEntry(UserEntry, conversationId, { model: [user] });
+			// The continuation starts the run's turn count over: bounding `onYield` loops is the extension's job.
+			if (live.run?.taskId === runtime.taskId) live.run.turns = 0;
 			handOver(live, runtime.taskId, await createGeneration(tx, conversationId));
 			delete live.generation;
 			return result;
@@ -808,6 +811,20 @@ async function answer(runtime: Runtime, message: AssistantMessage, context: Cont
 		if (users.length > 0) await startRun(tx, conversationId, live, users);
 		return result;
 	}, context);
+}
+
+/**
+ * Whether an answer's `onYield` continuation is taken (spec §8.3), decided from the inbox before the final boundary
+ * places anything: only when it holds no user item, of which the boundary would select one, and no reset, which would
+ * otherwise run first. A continuation starts the turn count over.
+ */
+function takesContinuation(continuation: UserInput | undefined, boundary: Boundary): continuation is UserInput {
+	const items = boundary.inbox.items;
+	return (
+		continuation !== undefined &&
+		!items.some((item) => item.mode === "steer" || item.mode === "followUp") &&
+		!hasQueuedReset(items)
+	);
 }
 
 /**
@@ -854,6 +871,8 @@ async function startToolRound(
 		}
 		delete live.generation;
 		live.tools = slots;
+		// A tool round is one turn of the run (`AgentState.maxTurns`).
+		if (live.run?.taskId === runtime.taskId) live.run.turns += 1;
 		const checkpoint = { phase: "tools", assistant: entry.id, tools, pending } as const;
 		return { status: "waiting", checkpoint, on: tools, policy: "allSettled" };
 	}, context);
@@ -861,8 +880,9 @@ async function startToolRound(
 
 /**
  * The round's tools are terminal: apply their controls, append a `handoff`'s reset, and then end the run at the final
- * boundary (`terminate`), end it at a queued reset, or hand it to the next generation at the `postTools` boundary, in
- * the handoff's new context when there is one (spec §8.5).
+ * boundary (`terminate`), end it like a failure at the conversation's turn limit (`turn_limit`), end it at a queued
+ * reset, or hand it to the next generation at the `postTools` boundary, in the handoff's new context when there is one
+ * (spec §8.5).
  */
 async function finishToolRound(
 	runtime: Runtime,
@@ -891,6 +911,8 @@ async function finishToolRound(
 	const added = ordered.flatMap((control) => control?.addTools ?? []);
 	// The last handoff in call order wins.
 	const handoff = ordered.findLast((control) => control?.handoff !== undefined)?.handoff;
+	// Read from the phase's agent, as every agent field; a `configure()` during the round applies at its end.
+	const maxTurns = (await runtime.agent(context)).maxTurns;
 	await runtime.commit(async (tx): Promise<Next> => {
 		const boundary = await prepareBoundary(tx, conversationId, runtime.settings);
 		if (added.length > 0) await addTools(tx, conversationId, added);
@@ -902,10 +924,21 @@ async function finishToolRound(
 			const entry = await tx.appendEntry(ResetEntry, conversationId, { head: "self", model: [message] });
 			boundary.head = entry.id;
 		}
+		const turns = live.run?.taskId === runtime.taskId ? live.run.turns : 0;
 		if (terminate) {
 			const { users } = await applyBoundary(tx, boundary, "final", now);
 			endRun(tx, live, runtime.taskId, { status: "done", answer: assistant });
 			if (users.length > 0) await startRun(tx, conversationId, live, users);
+		} else if (maxTurns !== undefined && turns >= maxTurns) {
+			// The turn limit ends the run like a failure: `afterFailedRun` decides the queued items, and a continue resumes
+			// it on the round's results. The table was read for the boundary already, before any write.
+			const policy = runtime.settings.afterFailedRun;
+			const failure = { policy, ...(policy === "continue" ? { boundary } : {}) };
+			await endFailedRun(tx, runtime, live, failure, {
+				status: "unanswered",
+				reason: "turn_limit",
+				detail: turns === 1 ? "1 turn" : `${turns} turns`,
+			});
 		} else {
 			const { users, reset } = await applyBoundary(tx, boundary, "postTools", now);
 			if (reset) {
@@ -947,7 +980,7 @@ export async function startRun(
 	inputs: SubmissionId[],
 	options?: { readonly keepFailure?: boolean },
 ): Promise<void> {
-	live.run = { taskId: await createGeneration(tx, conversationId, { submissionIds: inputs }), inputs };
+	live.run = { taskId: await createGeneration(tx, conversationId, { submissionIds: inputs }), inputs, turns: 0 };
 	if (options?.keepFailure !== true) delete live.runFailure;
 }
 
