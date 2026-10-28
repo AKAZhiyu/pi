@@ -1639,6 +1639,15 @@ validation and copies the v2 kernel added around Delta.
   the outbox, export, import, the applier and later `evolveTable` versions handle them as every table. The partial
   head index becomes an index on `(conversation_id, has_head, id)`; indexed strings that must stay lossless keep
   Durable's JSON encoding.
+- **Slice 6b D3: one id counter per store (owner, 2026-10-27: "a"):** the store's counter (`next_document_id`, renamed
+  `next_id`; the archive manifest's `nextDocumentId` becomes `nextId`) numbers every id in the store: Durable's
+  `mintId` (conversations, entries, tasks, submissions, documents) takes from it in memory, explicit ids in Durable's
+  writes raise it (an entry committed with id 100: the next mint is 101), and Chord's commit step takes its documents'
+  ids from it; it is persisted as a high-water mark with every commit. `record_ids` stays for Durable's type check of
+  an id ("already belongs to entry"); supersedes "Slice 6 first decisions" (3)'s `coalesce(max(id), 1) + 1` and 6a's
+  "document ids monotonic with seq". Durable's own ids still rise in its creation order (its Session line serializes
+  its commits and mints inside them), which its scans, transcripts and windows rely on; Chord's ids are gaps between
+  them, as the five record types already leave. A minted id never committed may come again after a reopen (S10).
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

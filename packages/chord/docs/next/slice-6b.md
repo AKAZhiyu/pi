@@ -78,17 +78,12 @@ kinds and keys) keep Durable's JSON encoding in their columns.
 
 ### 1.2 IDs
 
-> **Decision needed (D3): one id counter or two.** Durable mints ids before a commit (`mintId`), one namespace across
-> conversations, entries, tasks, submissions and documents ("greater than every id minted since this storage was
-> opened and every id stored, also across reopen", S10); its documents carry their id into the commit. Chord's store
-> assigns its documents' ids inside the step from its own counter (`next_document_id`), and the engine's
-> `chord_documents.id` is the primary key for both. Options: (a) **one counter per store**: `mintId` takes from the
-> store's counter in memory (persisted as a high-water mark with every commit), Chord's step takes from it too; Chord's
-> document ids are then no longer monotonic with seq (6a small item 11) and a Durable id minted but never committed
-> is skipped; (b) **two counters**: Durable's from `record_ids` (`coalesce(max(id), 1) + 1` at open, decided), Chord's
-> as today, and the engine's documents table keyed by `(namespace, id)` (Durable's document ids live in Durable's
-> namespace). Proposal: (b): Durable keeps its id contract unchanged and Chord its step-assigned ids; the composite key
-> costs nothing measurable and keeps the two adapters apart (S13: the engine is shared, the namespaces are not).
+**One counter per store (D3, owner, 2026-10-27):** the store's counter (`next_document_id` renamed `next_id`, the
+manifest's `nextDocumentId` renamed `nextId`) numbers every id: `StoreStorage.mintId()` takes from it in memory,
+explicit ids in Durable's writes raise it, Chord's commit step takes its documents' ids from it, and every commit
+persists it as a high-water mark. `record_ids` stays for Durable's "ID n already belongs to entry" check. Durable's ids
+rise in its creation order (its scans and windows rely on it); Chord's ids are gaps between them. Spec reviewers check
+that nothing relies on Chord's document ids rising with seq.
 
 ### 1.3 Documents
 
