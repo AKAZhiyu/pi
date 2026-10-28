@@ -33,7 +33,7 @@ function getEnv(): NodeJS.ProcessEnv {
 	}
 }
 
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
@@ -77,6 +77,7 @@ export interface PathMetadata {
 	scope: SourceScope;
 	origin: "package" | "top-level";
 	baseDir?: string;
+	changelogPath?: string;
 	packageRoot?: string;
 }
 
@@ -672,6 +673,37 @@ function collectResourceFiles(dir: string, resourceType: ResourceType): string[]
 		return collectAutoExtensionEntries(dir);
 	}
 	return collectFiles(dir, FILE_PATTERNS[resourceType]);
+}
+
+// A `pi` object counts as an explicit resource manifest only when it lists resources. Packages whose
+// `pi` object holds only metadata (changelogPath, gallery image/video) still use directory auto-discovery.
+function hasManifestResourceFields(manifest: PiManifest): boolean {
+	return RESOURCE_TYPES.some((resourceType) => manifest[resourceType] !== undefined);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+	const relativePath = relative(parent, child);
+	return (
+		relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+	);
+}
+
+function resolvePackageChangelogPath(packageRoot: string, manifest: PiManifest | null): string | undefined {
+	const changelogPath = manifest?.changelogPath ?? "CHANGELOG.md";
+	if (!changelogPath) return undefined;
+
+	const resolvedPath = resolve(packageRoot, changelogPath);
+	if (!existsSync(resolvedPath)) return undefined;
+
+	const canonicalPackageRoot = canonicalizePath(packageRoot);
+	const canonicalChangelogPath = canonicalizePath(resolvedPath);
+	if (!isPathInside(canonicalPackageRoot, canonicalChangelogPath)) return undefined;
+
+	try {
+		return statSync(resolvedPath).isFile() ? resolvedPath : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string): boolean {
@@ -2249,6 +2281,14 @@ export class DefaultPackageManager implements PackageManager {
 		filter: PackageFilter | undefined,
 		metadata: PathMetadata,
 	): boolean {
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
+		const changelogPath = resolvePackageChangelogPath(packageRoot, manifest);
+		if (changelogPath) {
+			metadata.changelogPath = changelogPath;
+		} else {
+			delete metadata.changelogPath;
+		}
+
 		if (filter) {
 			for (const resourceType of RESOURCE_TYPES) {
 				const patterns = filter[resourceType];
@@ -2264,10 +2304,9 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
-		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		if (manifest) {
+		if (manifest && hasManifestResourceFields(manifest)) {
 			for (const resourceType of RESOURCE_TYPES) {
-				const entries = manifest[resourceType as keyof PiManifest];
+				const entries = manifest[resourceType];
 				this.addManifestEntries(
 					entries,
 					packageRoot,
@@ -2301,7 +2340,7 @@ export class DefaultPackageManager implements PackageManager {
 		metadata: PathMetadata,
 	): void {
 		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		const entries = manifest?.[resourceType as keyof PiManifest];
+		const entries = manifest?.[resourceType];
 		if (entries) {
 			this.addManifestEntries(entries, packageRoot, resourceType, target, metadata);
 			return;
@@ -2370,7 +2409,7 @@ export class DefaultPackageManager implements PackageManager {
 		resourceType: ResourceType,
 	): { allFiles: string[]; enabledByManifest: Set<string> } {
 		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		const entries = manifest?.[resourceType as keyof PiManifest];
+		const entries = manifest?.[resourceType];
 		if (entries && entries.length > 0) {
 			const allFiles = this.collectFilesFromManifestEntries(entries, packageRoot, resourceType);
 			const manifestPatterns = entries.filter(isOverridePattern);
