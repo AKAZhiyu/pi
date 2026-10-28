@@ -4617,10 +4617,10 @@ type CompactionStatus = {
 | field | value |
 |---|---|
 | kind | `pi.live` |
-| version | `2` |
+| version | `3` |
 | scope/history/fork | conversation, `latest`, `initial` |
 | `initial()` | `{}` |
-| `migrate()` | from version 1: `reason` of each `compactions` status and of `compactionFailure` renamed `trigger`, and `run.turns` set to `0` (section 3.6); `run.first`, `run.afterRun`, and `runFailure.first` are optional and need no step |
+| `migrate()` | from version 1: `reason` of each `compactions` status and of `compactionFailure` renamed `trigger`; from versions 1 and 2: `run.turns` set to `0` where it is missing (section 3.6); `run.first`, `run.afterRun`, and `runFailure.first` are optional and need no step |
 | checkpoint | complete base whenever nothing runs: `generation` absent and no `running` tool or nested slot |
 | view mount | `docs["pi.live"]` |
 | created | with every Harness conversation (section 2.2) |

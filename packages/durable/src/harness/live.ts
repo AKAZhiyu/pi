@@ -193,19 +193,20 @@ export type LiveState = {
 
 export const LiveDoc = defineDoc<LiveState>({
 	kind: "pi.live",
-	version: 2,
+	version: 3,
 	scope: "conversation",
 	history: "latest",
 	fork: "initial",
 	initial: () => ({}),
-	// Version 1 named a compaction's trigger `reason`, in `compactions` and `compactionFailure`, and had no `run.turns`:
-	// a run in flight across the upgrade counts its turns from 0.
+	// Version 1 named a compaction's trigger `reason`, in `compactions` and `compactionFailure`. Versions 1 and 2 (as
+	// builds before `run.turns` stored it) may lack `run.turns`: a run in flight across the upgrade counts its turns
+	// from 0. Version 2 already names the trigger `trigger`, so renaming leaves it alone.
 	migrate: (value) => {
 		const live = value as { run?: JsonObject; compactions?: JsonObject[]; compactionFailure?: JsonObject };
 		const { run, compactions, compactionFailure } = live;
 		return {
 			...value,
-			...(run === undefined ? {} : { run: { ...run, turns: 0 } }),
+			...(run === undefined ? {} : { run: { ...run, turns: typeof run.turns === "number" ? run.turns : 0 } }),
 			...(compactions === undefined ? {} : { compactions: compactions.map(renameReason) }),
 			...(compactionFailure === undefined ? {} : { compactionFailure: renameReason(compactionFailure) }),
 		} as LiveState;
