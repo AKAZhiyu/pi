@@ -894,9 +894,9 @@ host.serve(DraftStore, (_, self) => {               // local, empty params: may 
   storage batch through the store's commit step, `await store.commit(writes, adopt, ctx)` without the caller's abort
   signal (deltas, or a base when `checkpointWhen` says so; the line held until the step returned, as Durable's
   `#runCommit`, owner, 2026-10-26); adopt by pointer swap and mark dependents in the step, persisted and in-memory
-  documents and staged changes in one `host.batch.commit` (any backend error in the step is `storage_failed`,
-  Durable's rule, owner, 2026-10-26: plugin mistakes are refused when a write is staged; a seal-fenced commit is
-  rejected `released` before `BEGIN`); then the owner's synchronous flush recomputes dirty derives, sends one message
+  documents and staged changes in one `host.batch.commit` (errors as Durable's Storage, owner, 2026-10-27: a step that
+  fails before `COMMIT` rolls back and rejects that commit only, nothing adopted, the store goes on; plugin mistakes are
+  refused when a write is staged; a seal-fenced commit is rejected `released` before `BEGIN`); then the owner's synchronous flush recomputes dirty derives, sends one message
   per link and queues watch callbacks (W1); drafts then throw if touched. In-memory-only commits take no store seq and never
   enter the commit queue (W12). No
   revalidation of the whole document, no copy, no freeze.
@@ -1077,10 +1077,15 @@ host.serve(DraftStore, (_, self) => {               // local, empty params: may 
   runtime has it, otherwise a `MessageChannel` message (2026-10-27, slice 6a build reviews).
 - **Eviction as in Durable,** for keyed persisted documents only (persisted singletons and `at(key)` documents stay
   in memory while their object lives: `handle.value` is a synchronous read; owner, 2026-10-26): one not read, written or watched for the retention
-  period (default 10 minutes) leaves memory and reloads on the next access. A storage error ends the store and closes
-  the host; `onError` receives `{ kind: "storage_failed" }` and the app decides (section 3). Any backend error in a
-  commit step, or on a read whose `ctx` was not aborted, is a storage error (Durable's rule); later calls reject
-  `unavailable/storage_failed`.
+  period (default 10 minutes) leaves memory and reloads on the next access. **Store errors (owner, 2026-10-27; supersedes in part "Store errors: Durable's rule"):** the store has Durable's
+  `Storage` semantics, its owners react as Durable's Session does. A step that fails before `COMMIT` rolls back: that
+  commit rejects, nothing is adopted, the store goes on. The store stops (`storage_failed`: later calls reject
+  `unavailable/storage_failed`, the host closes, `onError` receives `{ kind: "storage_failed" }`, the app decides,
+  section 3) only when the outcome is unknown (`COMMIT` or `ROLLBACK` failed) or `adopt` threw, and on a backend
+  error of a read whose `ctx` was not aborted. A Chord object whose commit the step refused (memory and disk disagree:
+  the counted conditional `UPDATE`, the live-address index) fails live (`object_failed`, `broken`); an `int` result out
+  of range (`CHECK`) fails only that transaction (`invalid/args`). Durable's Session fails on any commit error
+  (`GuardedStorage`), as today.
 
 ---
 

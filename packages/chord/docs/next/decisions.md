@@ -1648,6 +1648,17 @@ validation and copies the v2 kernel added around Delta.
   "document ids monotonic with seq". Durable's own ids still rise in its creation order (its Session line serializes
   its commits and mints inside them), which its scans, transcripts and windows rely on; Chord's ids are gaps between
   them, as the five record types already leave. A minted id never committed may come again after a reopen (S10).
+- **Slice 6b D4: the store has Durable's Storage semantics (owner, 2026-10-27: "agreed"; supersedes in part "Store
+  errors: Durable's rule" and slice-6a rule 10's "an expression result outside it fails the step, which is
+  `storage_failed`"):** Durable has two levels: its `Storage` rolls a failed commit back and stays usable (the
+  conformance suite tests it), its Session fails on any commit error (`GuardedStorage`). "Store errors: Durable's
+  rule" had put the Session's level into the store. Now: a step that fails before `COMMIT` rolls back and rejects that
+  commit only (the step's code runs in the transaction callback, so an error there is known to come before `COMMIT`);
+  the store stops only when the outcome is unknown (`COMMIT` or `ROLLBACK` failed), when `adopt` threw, or on a read's
+  backend error. Owners react as Durable's Session: Durable's Session fails (unchanged); a Chord object whose commit the
+  step refused fails live (`object_failed`, `broken`: memory and disk disagree); an `int` `CHECK` failure (a plugin's
+  value out of range) fails only that transaction (`invalid/args`). `StoreStorage` runs Durable's commit checks in the
+  step, where `SqliteStorage` runs them: no special case. Built in 6b (the store's step and object failure).
 - **The performance and memory bar, and converging reviews (owner, 2026-10-27: "yes"):** supersedes "as good as
   HEAD in everything" for Chord v2 slices and pi changes. CPU: each hot path (calls, changes, watches, links) within
   about 5% of HEAD, measured in bursts with alternating processes pinned to one CPU; worse is fixed or goes to the

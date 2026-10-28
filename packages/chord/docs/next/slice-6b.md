@@ -71,10 +71,8 @@ kinds and keys) keep Durable's JSON encoding in their columns.
   orders, the fork chain walked as `SqliteStorage` does), `task`, `scanTasks`, `submission`, `scanSubmissions`,
   `submissionByRequest`, `scanConversations`: queries over the declared tables, Durable's cursors (`{ after, order }`,
   `scan.ts`) kept as they are (built from the last id, not from Chord's table cursors).
-- **Validation before the step** (D4 below): what `SqliteStorage` checks inside its transaction
-  (`checkGlobalIds`, `prepareDocumentActions`, `checkDocumentActions`) runs before `store.commit`, with plain reads:
-  only Durable's Session writes these tables and it serializes its commits, so the reads see the state the step will
-  write on (the argument of S11).
+- **Validation in the step** (D4): what `SqliteStorage` checks inside its transaction (`checkGlobalIds`,
+  `prepareDocumentActions`, `checkDocumentActions`) runs inside the store's step, which rolls back a refused commit.
 
 ### 1.2 IDs
 
@@ -115,13 +113,13 @@ scope as a string (`session`, `conversation:7`, `task:31`), kind and key JSON-en
 - **Durable's seq is the store's seq** (gaps allowed: Chord's commits take seqs too).
 - **Errors:**
 
-> **Decision needed (D4): what a refused Durable commit does to the store.** The store's rule: any backend error in a
-> step is `storage_failed`, the store stops (Durable's own rule for its Session). Durable's conformance suite commits
-> invalid batches on purpose ("ID 1 already belongs to conversation", "already has a current incarnation", "version
-> transition requires a base", a mismatched copy) and expects the storage to go on. Proposal: those checks run before
-> the step (1.1) and reject there, the store untouched; only a backend failure inside the step stops the store. In
-> production the Session fails on any commit error either way (`GuardedStorage`), so the difference is only that the
-> store, shared with Chord's objects, does not stop for a Durable bug caught by its checks.
+**Errors (D4, owner, 2026-10-27):** the store takes Durable's `Storage` semantics (design §10 "Store errors"): a
+step that fails before `COMMIT` rolls back and rejects that commit only; the store stops only on an unknown outcome
+(`COMMIT` or `ROLLBACK` failed), a throwing `adopt`, or a read's backend error. Owners react as Durable's Session:
+Durable's Session fails (`GuardedStorage`, unchanged); a Chord object whose commit the step refused fails live
+(`object_failed`, `broken`); an `int` `CHECK` failure fails only its transaction (`invalid/args`). `StoreStorage` runs
+Durable's commit checks in the step, as `SqliteStorage` does, so the conformance suite's refused commits leave the
+store usable. 6b changes 6a's step and object failure accordingly.
 
 - `mintId`, `close(context)` (closes nothing of the store: the app owns it; later calls reject "closed"), reads after
   a store failure reject as Durable's `GuardedStorage` expects.
